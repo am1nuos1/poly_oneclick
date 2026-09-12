@@ -1,0 +1,108 @@
+# BTC 5-minute FAK executor
+
+Node.js 24+。启动时用上下键选择 Bitcoin 五分钟或其他市场，无浏览器 UI、轮询行情、数据库或日志依赖。
+
+完整参数、价格机制、操作步骤、延迟字段和故障排查见 [USER_GUIDE.md](./USER_GUIDE.md)。
+
+## 最简单的启动方法
+
+全部配置都在纯文本文件 `config.txt` 中。先用记事本编辑并保存它，然后双击 [start.cmd](./start.cmd) 启动。`start.cmd` 只读取配置并启动程序，不会创建、打开或修改配置文件。以后修改配置时仍直接编辑 `config.txt`，修改后需重启程序。
+
+`config.txt` 的格式是每行一个配置，等号两边不要加空格，值不要加引号：
+
+```ini
+# ===== 账户与市场 =====
+MARKET_OUTCOME=UP
+PRIVATE_KEY=0x你的64位十六进制私钥
+# 市场在启动菜单选择；其他市场的 Token ID 在启动时输入
+
+# ===== 每次订单大小 =====
+ORDER_SIZE=1
+ORDER_SIZE_UNIT=USD
+
+# ===== 自动卖出 =====
+AUTO_SELL_TRIGGER=0.90
+
+# ===== 成交价格与滑点 =====
+BUY_SLIPPAGE_ENABLED=true
+SELL_SLIPPAGE_ENABLED=true
+BUY_SLIPPAGE=0
+SELL_SLIPPAGE=0
+
+# ===== 运行模式 =====
+LIVE_TRADING=false
+```
+
+完整无密钥模板是 `config.example.txt`。实际 `config.txt` 只保存在本机，并已被 `.gitignore` 排除；不要提交、分享或复制其中的私钥。建议先保持 `LIVE_TRADING=false` 测试。
+
+如果双击后提示缺少 dependencies 或 build，再打开 PowerShell，在该目录执行一次：
+
+```powershell
+cd C:\Users\czhang30\Desktop\poly\btc-5m-executor
+npm install
+npm run build
+```
+
+默认 `LIVE_TRADING=false`。本地 signer 仍完成签名，但绝不调用 `postOrder`。
+只有显式 `LIVE_TRADING=true` 才允许真实 FAK 订单。`config.txt` 已加入 `.gitignore`，不要提交或分享它。
+
+| 变量 | 含义 |
+| --- | --- |
+| MARKET_OUTCOME | 选择 Bitcoin 五分钟时交易 `UP` 或 `DOWN` |
+| PRIVATE_KEY | 本地 EOA 私钥，0x + 64 位十六进制 |
+| ORDER_SIZE | 每次按键或自动 SELL 使用的固定大小 |
+| ORDER_SIZE_UNIT | `USD` 表示美元目标金额；`SHARES` 表示 token 份额 |
+| AUTO_SELL_TRIGGER | bid 触发阈值，例如 0.90 = 90¢ |
+| BUY_SLIPPAGE_ENABLED | BUY 是否使用滑点限制；`false` 时有卖单就立即尝试买入 |
+| SELL_SLIPPAGE_ENABLED | SELL 是否使用滑点限制；`false` 时有买单就立即尝试卖出 |
+| BUY_SLIPPAGE / SELL_SLIPPAGE | 绝对价格增减，例如 0.01 = 1¢，默认 0 |
+| LIVE_TRADING | 默认 false；只接受 true / false |
+
+`b` BUY，`s` SELL，`a` armed/disarmed，Ctrl+C 退出。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出从 armed 后的下一条有效报价开始判断，`bestBid >= AUTO_SELL_TRIGGER` 时触发一次，立即 disarm；它也使用同一个 `ORDER_SIZE`。再次自动卖出需要重新按 `a`，包括下单失败之后。启动时 disarmed。一次只允许一笔在途订单；忙碌时手动输入报错，不排队。
+
+`ORDER_SIZE_UNIT=USD` 时，BUY 的 `ORDER_SIZE` 是美元名义金额（手续费可能另计）；SELL 会在触发时用 `ORDER_SIZE / bestBid` 换算卖出份额，所以它代表按当前最优买价计算的目标美元金额。FAK 可能只成交一部分，且启用 SELL slippage 时成交价可能低于触发时的 bestBid，因此实际卖出收入不保证刚好等于 `ORDER_SIZE`。`ORDER_SIZE_UNIT=SHARES` 时，BUY 和 SELL 都以固定 token 份额为目标；SDK 的 BUY 接口仍接收美元，因此程序用份额乘本次 BUY 限价换算签名金额。
+
+## 订单路径
+
+官方 SDK 固定为 `@polymarket/client@0.10.0`，使用 `privateKey`、`createSecureClient`、`createMarketOrder` 和 `postOrder`。显式 EOA 地址避免默认 deposit-wallet 创建流程。初始化时创建/派生 API credentials，预热 BUY/SELL 签名和 SDK metadata 缓存；预热签名丢弃，不提交。启动完成后 signer、credentials、HTTP client 复用。
+
+BUY：内存 `bestAsk + BUY_SLIPPAGE` → tick 对齐 / clamp → `maxPrice` + FAK → 本地签名 → `postOrder`。
+
+SELL：内存 `bestBid - SELL_SLIPPAGE` → tick 对齐 / clamp → `minPrice` + FAK → 本地签名 → `postOrder`。
+
+`BUY_SLIPPAGE_ENABLED=true` 时 BUY 使用 `bestAsk + BUY_SLIPPAGE`；`SELL_SLIPPAGE_ENABLED=true` 时 SELL 使用 `bestBid - SELL_SLIPPAGE`。价格 clamp 至 `[tick, 1-tick]`，tick 对齐朝原报价方向取整，不额外扩大 slippage。某一侧设为 `false` 时只忽略该侧的 slippage 数值：BUY 显式使用最高合法价 `1-tick`，SELL 显式使用最低合法价 `tick`，因此该侧有可用流动性就立即成交；这可能接受非常差的成交价。不调用未显式传价格的 SDK market-order 路径。FAK 可部分成交或零成交；成功响应不等于全部成交。
+
+官方 Market WebSocket：`wss://ws-subscriptions-clob.polymarket.com/ws/market`。订阅 `{ assets_ids: [TOKEN_ID], type: "market", custom_feature_enabled: true }`，关闭 per-message deflate。处理 `best_bid_ask`、`price_change`，初始 `book` 仅扫描最高买价/最低卖价，不保存 depth。10 秒 PING，30 秒未收到 PONG 则断开，1 秒后重连。断线清空报价并 disarm；报价超过 5 秒未更新时拒单。
+
+## 延迟
+
+`process.hrtime.bigint()` 记录 WS callback、JSON parse、trigger 判断、execute 调用、postOrder 调用和返回时间，输出原始 ns 时间戳与 us/ms 间隔：
+
+- `ws_to_parse`
+- `parse_to_trigger`（包含报价更新）
+- `trigger_to_post`（包含本地签名）
+- `post_to_response`（包含 SDK HTTP/HMAC、网络及响应处理）
+- `ws_to_post`
+- `input_to_post`、`invoke_to_post`
+
+手动订单用键盘 callback 作为 input 起点，WS 相关指标为 null，避免把用户思考时间算作行情延迟。Dry run 用 `dry_dispatch_ns`、`dry_*_to_dispatch_us/ms` 记录签名后的模拟发送边界，真实 post/response 指标为 null。`postOrder` 调用时间不是 socket 实际写出时间。
+
+普通行情不打印。订单/触发日志通过 `setImmediate` 延后格式化输出，不在发送前同步写日志；连接、armed 状态与停止交易原因只在状态变化时输出。
+
+## SDK 边界与限制
+
+- SDK 的显式价格路径仍使用内部 metadata 缓存。固定版本缓存 TTL 为 10 分钟，本程序在预热开始后 9 分钟停止交易；tick size 变化也停止交易，需要重启。运行阶段的 fetch 保护只放行真实模式下的 `POST /order`，禁止隐含 REST 查价/查 market。不会在热路径刷新 metadata。
+- 新官方 SDK 自身包含 Zod/ky 等依赖及内部校验。这是“使用当前官方 SDK”和“完全不使用 Zod”之间的实际冲突；应用源码无 Zod、schema 库或额外 HTTP client。未修改 SDK 内部实现来绕过校验。
+- 只支持私钥对应的 EOA 资金/持仓；不配置 proxy、Safe 或 deposit wallet。资金、token 持仓与链上授权需预先准备，本程序不发送授权交易。
+- 用户负责指定正确市场；没有自动发现、5 分钟滚动切换、仓位查询、完整深度、成交追踪、重试或结算。失败/超时不自动重发；请求可能已被接受，应检查交易所状态后再操作。
+- 不保证某个延迟或成交价格优于配置上限；需自行测量实际部署环境。事件循环调度、SDK 签名与网络耗时都仍然存在。
+
+## 本次验证
+
+- 使用 Node.js v24.19.0，通过 npm CLI 执行 `npm install`（34 个包，audit 0 vulnerabilities）与 `npm run build`。
+- 当前 shell 没有 npm 命令，验证时将官方 npm CLI 临时解压至 `%TEMP%\poly-executor-npm`，执行 `node "$env:TEMP\poly-executor-npm\package\bin\npm-cli.js" install` / `run build`。标准安装 Node/npm 的终端可直接执行上面的命令。
+- 随机生成、未存盘、未输出的测试 EOA：启动成功，连接真实官方 WS，手动 BUY/SELL 与一次自动 SELL 完成本地签名并 dry run。测试 token 来自 `btc-updown-5m-1789190400`，仅为验证时临时选择，不写入程序或示例配置。未发送真实订单。
+- 一次自动触发样本：WS→parse 14.5 us；parse→trigger 41.7 us；WS→dry dispatch 1263.9 us / 1.2639 ms。不是 p50/p99 或实际 HTTP 延迟。
+- 临时隔离检查脚本覆盖手动/自动 FAK、单次触发、盘口解析、并发锁、无效/过期报价、tick/缓存失效、断线、slippage/clamp、模拟 post 延迟、禁止隐藏 REST、失败不重试及数组消息。真实提交分支仅使用内存 fake transport。
+
+官方参考：[SDK](https://github.com/Polymarket/ts-sdk/tree/main/packages/client)、[Market WebSocket](https://docs.polymarket.com/market-data/realtime-data)。

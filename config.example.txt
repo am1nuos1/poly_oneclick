@@ -1,0 +1,20 @@
+# ===== 账户与 Bitcoin 五分钟方向 =====
+MARKET_OUTCOME=UP
+PRIVATE_KEY=0x_REPLACE_WITH_LOCAL_PRIVATE_KEY
+# 市场在启动菜单选择；选择其他市场时，程序会要求输入 Token ID
+
+# ===== 每次订单大小 =====
+ORDER_SIZE=1
+ORDER_SIZE_UNIT=USD
+
+# ===== 自动卖出 =====
+AUTO_SELL_TRIGGER=0.90
+
+# ===== 成交价格与滑点 =====
+BUY_SLIPPAGE_ENABLED=true
+SELL_SLIPPAGE_ENABLED=false
+BUY_SLIPPAGE=0
+SELL_SLIPPAGE=0
+
+# ===== 运行模式 =====
+LIVE_TRADING=false

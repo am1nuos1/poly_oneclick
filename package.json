@@ -1,0 +1,23 @@
+{
+  "name": "poly-btc-executor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file=config.txt dist/main.js"
+  },
+  "dependencies": {
+    "@polymarket/client": "0.10.0",
+    "viem": "^2.37.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.9.0"
+  }
+}
