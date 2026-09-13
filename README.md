@@ -58,7 +58,9 @@ npm run build
 | BUY_SLIPPAGE / SELL_SLIPPAGE | 绝对价格增减，例如 0.01 = 1¢，默认 0 |
 | LIVE_TRADING | 默认 false；只接受 true / false |
 
-`b` BUY，`s` SELL，`a` armed/disarmed，`Tab` 在 Bitcoin 五分钟的 UP/DOWN 间切换，Ctrl+C 退出。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出使用本次运行中由程序买入的加权平均成本；例如平均买入价 0.50、`AUTO_SELL_PROFIT_PERCENT=20`，目标价就是 0.60。当 `bestBid` 达到目标时触发一次并立即 disarm；它也使用同一个 `ORDER_SIZE`。按 `a` 时若当前 Token 尚无本次买入记录，程序会显示 `ARM FAILED`。切换 UP/DOWN 会 disarm，并为两个 Token 分别保留本期内的买入成本；进入下一期市场后重新计算。
+`b` BUY，`s` SELL，`a` armed/disarmed，`Tab` 在 Bitcoin 五分钟的 UP/DOWN 间切换，`←` 返回上一期，`→` 前往下一期，Ctrl+C 退出。终端会在“当前市场”和“当前品种”行显示本期场次（UTC 起止时间）。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出使用本次运行中由程序买入的加权平均成本；例如平均买入价 0.50、`AUTO_SELL_PROFIT_PERCENT=20`，目标价就是 0.60。当 `bestBid` 达到目标时触发一次并立即 disarm；它也使用同一个 `ORDER_SIZE`。按 `a` 时若当前 Token 尚无本次买入记录，程序会显示 `ARM FAILED`。切换 UP/DOWN 会 disarm，并为两个 Token 分别保留本期内的买入成本；进入下一期市场后重新计算。
+
+在 Bitcoin 五分钟模式中，`←`/`→` 会尝试切换到相邻场次。目标场次尚未开放、已经结束或查询失败时，终端会明确提示“无法返回上一期”或“无法前往下一期”，当前场次继续保持不变。程序到达当前场次结束时间后会自动寻找并切换到新的场次。
 
 `ORDER_SIZE_UNIT=USD` 时，BUY 的 `ORDER_SIZE` 是美元名义金额（手续费可能另计）；SELL 会在触发时用 `ORDER_SIZE / bestBid` 换算卖出份额，所以它代表按当前最优买价计算的目标美元金额。FAK 可能只成交一部分，且启用 SELL slippage 时成交价可能低于触发时的 bestBid，因此实际卖出收入不保证刚好等于 `ORDER_SIZE`。`ORDER_SIZE_UNIT=SHARES` 时，BUY 和 SELL 都以固定 token 份额为目标；SDK 的 BUY 接口仍接收美元，因此程序用份额乘本次 BUY 限价换算签名金额。
 

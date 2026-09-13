@@ -10,6 +10,14 @@ const ORDER_URL = 'https://clob.polymarket.com/order';
 const GAMMA_URL = 'https://gamma-api.polymarket.com/markets/slug/';
 const MARKET_SECONDS = 300;
 
+function formatSessionRange(start: number): string {
+  const clock = (seconds: number): string => {
+    const date = new Date(seconds * 1000);
+    return `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`;
+  };
+  return `${clock(start)}–${clock(start + MARKET_SECONDS)} UTC`;
+}
+
 function fault(message: string): Error {
   const error = new Error(message);
   error.name = 'ExecutorError';
@@ -124,29 +132,82 @@ type CostBasis = { shares: number; cost: number };
 // Formatting and console I/O happen on a later turn, never before order dispatch.
 function report(event: string, trace?: Trace, detail?: object): void {
   setImmediate(() => {
-    const interval = (a?: bigint, b?: bigint) => a === undefined || b === undefined
-      ? null : { us: Number(b - a) / 1e3, ms: Number(b - a) / 1e6 };
-    console.log(JSON.stringify({
-      event, ...detail,
-      ...(trace && {
-        source: trace.source,
-        timestamps_ns: {
-          ws: trace.ws?.toString(), parsed: trace.parsed?.toString(),
-          input: trace.input?.toString(), trigger: trace.trigger.toString(),
-          invoke: trace.invoke?.toString(), post: trace.post?.toString(),
-          response: trace.response?.toString(),
-        },
-        latency: {
-          ws_to_parse: interval(trace.ws, trace.parsed),
-          parse_to_trigger: interval(trace.parsed, trace.trigger),
-          trigger_to_post: interval(trace.trigger, trace.post),
-          post_to_response: interval(trace.post, trace.response),
-          ws_to_post: interval(trace.ws, trace.post),
-          input_to_post: interval(trace.input, trace.post),
-          invoke_to_post: interval(trace.invoke, trace.post),
-        },
-      }),
-    }));
+    const data = (detail ?? {}) as Record<string, unknown>;
+    const value = (name: string): string => data[name] === undefined || data[name] === null
+      ? '-' : String(data[name]);
+    const reasonText = (raw: unknown): string => {
+      const reason = String(raw ?? '');
+      if (reason === 'The selected market has already ended') return '该场次已结束';
+      if (reason === 'BTC five-minute market was not found') return '该场次不存在或尚未生成';
+      if (reason === 'BTC five-minute market is not open for trading') return '该场次尚未开放交易';
+      if (reason === 'An order is currently being submitted') return '上一笔订单还在提交';
+      if (reason === 'Market switch already in progress') return '市场切换进行中';
+      if (reason === 'Only available in Bitcoin five-minute mode') return '仅 Bitcoin 五分钟模式可用';
+      return reason || '未知原因';
+    };
+    const interval = (a?: bigint, b?: bigint): string | undefined => {
+      if (a === undefined || b === undefined) return undefined;
+      const us = Number(b - a) / 1e3;
+      return `${us.toFixed(1)}µs/${(us / 1e3).toFixed(3)}ms`;
+    };
+    const latency = trace ? [
+      ['WS→解析', interval(trace.ws, trace.parsed)],
+      ['解析→触发', interval(trace.parsed, trace.trigger)],
+      ['触发→发送', interval(trace.trigger, trace.post)],
+      ['发送→响应', interval(trace.post, trace.response)],
+      ['WS→发送', interval(trace.ws, trace.post)],
+      ['按键→发送', interval(trace.input, trace.post)],
+    ].filter((item): item is [string, string] => item[1] !== undefined)
+      .map(([name, duration]) => `${name} ${duration}`).join('，') : '';
+    const withLatency = (line: string): string => latency ? `${line} | ${latency}` : line;
+    let line: string;
+
+    if (event === 'READY') {
+      const session = value('session');
+      line = `准备完成｜${data.live ? '真实交易' : '模拟模式'}｜场次 ${session}｜B买 S卖 A自动卖 Tab切UP/DOWN ←上一期 →下一期`;
+    } else if (event === 'WS CONNECTED') {
+      line = '行情已连接';
+    } else if (event === 'WS DISCONNECTED') {
+      line = '行情已断开，正在重连；自动卖出已关闭';
+    } else if (event === 'MARKET SELECTED' || event === 'MARKET SWITCHED') {
+      line = `当前市场｜场次 ${value('session')}｜${value('market')}｜${value('outcome')}｜Token ${value('tokenId')}`;
+    } else if (event === 'MARKET SWITCHING') {
+      line = `${data.direction === 'NEXT' ? '正在前往下一期' : '正在返回上一期'}｜${value('targetMarket')}`;
+    } else if (event === 'MARKET SWITCH FAILED') {
+      line = `${data.direction === 'NEXT' ? '无法前往下一期' : '无法返回上一期'}｜${reasonText(data.reason)}`;
+    } else if (event === 'MARKET SEARCH RETRY') {
+      line = `下一期暂未就绪，正在重试｜${reasonText(data.reason)}`;
+    } else if (event === 'CURRENT TOKEN') {
+      line = `当前品种｜场次 ${value('session')}｜${value('outcome')}｜买 ${value('bestAsk')} 卖 ${value('bestBid')}｜Token ${value('tokenId')}`;
+    } else if (event === 'ARMED') {
+      line = `自动卖出已开启｜${value('outcome')}｜目标价 ${value('autoSellTarget')}`;
+    } else if (event === 'DISARMED') {
+      line = '自动卖出已关闭';
+    } else if (event === 'ARM FAILED') {
+      line = `无法开启自动卖出｜${value('reason')}`;
+    } else if (event === 'TAB SWITCH UNAVAILABLE' || event === 'OUTCOME SWITCH FAILED') {
+      line = `无法切换品种｜${value('reason')}`;
+    } else if (event === 'OUTCOME SWITCH QUEUED') {
+      line = `市场切换完成后将使用 ${value('outcome')}`;
+    } else if (event === 'TRADING DISABLED') {
+      line = `交易已暂停｜${value('reason')}`;
+    } else if (event.startsWith('DRY RUN ')) {
+      const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
+      const dryUs = Number(data.dry_input_to_dispatch_us ?? data.dry_trigger_to_dispatch_us);
+      const dryLatency = Number.isFinite(dryUs)
+        ? ` | 按键/触发→模拟发送 ${dryUs.toFixed(1)}µs/${(dryUs / 1e3).toFixed(3)}ms` : '';
+      line = `模拟 ${side}｜${value('configuredSize')} ${value('configuredUnit')}｜盘口 ${value('quotePrice')}｜限价 ${value('limitPrice')}｜提交 ${value('submittedAmount')} ${value('submittedUnit')}${dryLatency}`;
+    } else if (event === 'MANUAL BUY' || event === 'MANUAL SELL'
+      || event === 'AUTO BUY' || event === 'AUTO SELL') {
+      line = withLatency(`${event.startsWith('AUTO') ? '自动' : '手动'} ${event.endsWith('BUY') ? 'BUY' : 'SELL'} 已发送｜盘口 ${value('quotePrice')}｜限价 ${value('limitPrice')}｜${value('submittedAmount')} ${value('submittedUnit')}`);
+    } else if (event === 'ORDER SUCCESS') {
+      line = withLatency(`成交返回成功｜${value('side')}｜均价 ${value('averageFillPrice')}｜成交编号 ${value('orderId')}`);
+    } else if (event === 'ORDER FAILED') {
+      line = withLatency(`下单失败｜${value('side')}｜${data.reason ?? data.code ?? 'Polymarket rejected the order'}`);
+    } else {
+      line = data.reason ? `${event}｜${value('reason')}` : event;
+    }
+    console.log(line);
   });
 }
 
@@ -208,6 +269,8 @@ async function main(): Promise<void> {
   let tokenId = configuredTokenId;
   let subscribedTokenIds = configuredTokenId ? [configuredTokenId] : [];
   let marketAssets: Partial<Record<MarketOutcome, string>> = {};
+  let selectedMarketStart = 0;
+  let selectedMarketSlug = '';
   const tokenTicks = new Map<string, number>();
   const tokenMinOrderSizes = new Map<string, number>();
   const quotes = new Map<string, Quote>();
@@ -270,6 +333,8 @@ async function main(): Promise<void> {
     const autoSellTarget = autoSellTargetFor();
     return {
       outcome: autoFindMarket ? marketOutcome : 'CUSTOM',
+      market: selectedMarketSlug || null,
+      session: selectedMarketStart ? formatSessionRange(selectedMarketStart) : null,
       tokenId,
       bestBid: Number.isFinite(bestBid) ? bestBid : null,
       bestAsk: Number.isFinite(bestAsk) ? bestAsk : null,
@@ -313,17 +378,16 @@ async function main(): Promise<void> {
     return Array.isArray(value) && value.every(item => typeof item === 'string') ? value : [];
   }
 
-  async function discoverCurrentMarket(): Promise<{
+  async function discoverMarket(start = Math.floor(Date.now() / 1000 / MARKET_SECONDS) * MARKET_SECONDS): Promise<{
     assets: Record<MarketOutcome, string>; slug: string; start: number;
   }> {
-    const start = Math.floor(Date.now() / 1000 / MARKET_SECONDS) * MARKET_SECONDS;
     const slug = `btc-updown-5m-${start}`;
     const response = await nativeFetch(`${GAMMA_URL}${slug}`);
-    if (!response.ok) throw fault('Current BTC 5-minute market was not found');
+    if (!response.ok) throw fault('BTC five-minute market was not found');
     const market = await response.json() as Record<string, unknown>;
     if (market.slug !== slug || market.active !== true || market.closed === true
       || market.acceptingOrders !== true || market.enableOrderBook !== true) {
-      throw fault('Current BTC 5-minute market is not ready');
+      throw fault('BTC five-minute market is not open for trading');
     }
     const outcomes = readStringArray(market.outcomes);
     const assetIds = readStringArray(market.clobTokenIds);
@@ -375,25 +439,42 @@ async function main(): Promise<void> {
     connect();
   }
 
-  async function selectAutomaticMarket(initial: boolean, attempt = 0): Promise<void> {
+  async function selectAutomaticMarket(
+    initial: boolean,
+    attempt = 0,
+    requestedStart?: number,
+    direction?: 'PREVIOUS' | 'NEXT',
+  ): Promise<void> {
     if (stopped) return;
+    if (blocked === 'Changing BTC 5-minute market') return;
+    const previousBlocked = blocked;
     armed = false;
     blocked = 'Changing BTC 5-minute market';
     if (busy) {
-      rotation = setTimeout(() => { void selectAutomaticMarket(false); }, 50);
+      if (direction) {
+        blocked = previousBlocked;
+        report('MARKET SWITCH FAILED', undefined, { direction, reason: 'An order is currently being submitted' });
+      } else {
+        rotation = setTimeout(() => { void selectAutomaticMarket(false); }, 50);
+      }
       return;
     }
-    retireConnection();
     maintenance = true;
     try {
-      const selected = await discoverCurrentMarket();
+      const selected = await discoverMarket(requestedStart);
       const preparedUp = await prepareToken(selected.assets.UP);
       const preparedDown = await prepareToken(selected.assets.DOWN);
       if (Math.floor(Date.now() / 1000) >= selected.start + MARKET_SECONDS) {
-        throw fault('Market changed during preparation');
+        throw fault('The selected market has already ended');
       }
-      if (stopped) return;
+      if (stopped) {
+        maintenance = false;
+        return;
+      }
+      retireConnection();
       marketAssets = selected.assets;
+      selectedMarketStart = selected.start;
+      selectedMarketSlug = selected.slug;
       costBasisByToken.clear();
       finishPreparation(
         [selected.assets.UP, selected.assets.DOWN],
@@ -404,14 +485,23 @@ async function main(): Promise<void> {
         ],
       );
       const nextChangeMs = (selected.start + MARKET_SECONDS) * 1000 - Date.now() + 100;
+      clearTimeout(rotation);
       rotation = setTimeout(() => { void selectAutomaticMarket(false); }, Math.max(100, nextChangeMs));
-      report('MARKET SELECTED', undefined, { mode: 'AUTO', outcome: marketOutcome,
+      report(direction ? 'MARKET SWITCHED' : 'MARKET SELECTED', undefined, { mode: 'AUTO', direction,
+        outcome: marketOutcome,
         tokenId: selected.assets[marketOutcome], minOrderSize, market: selected.slug,
+        session: formatSessionRange(selected.start),
         endsAt: new Date((selected.start + MARKET_SECONDS) * 1000).toISOString() });
     } catch (error) {
       maintenance = false;
       const reason = error instanceof Error && error.name === 'ExecutorError'
         ? error.message : 'Automatic market search failed';
+      if (direction) {
+        blocked = previousBlocked;
+        report('MARKET SWITCH FAILED', undefined, { direction, reason,
+          currentMarket: selectedMarketSlug });
+        return;
+      }
       if (initial && attempt < 4) {
         await new Promise(resolve => setTimeout(resolve, 1_000));
         return selectAutomaticMarket(true, attempt + 1);
@@ -423,12 +513,36 @@ async function main(): Promise<void> {
     }
   }
 
+  function requestMarketStep(direction: 'PREVIOUS' | 'NEXT'): void {
+    if (!autoFindMarket) {
+      report('MARKET SWITCH FAILED', undefined, {
+        direction, reason: 'Only available in Bitcoin five-minute mode',
+      });
+      return;
+    }
+    if (blocked === 'Changing BTC 5-minute market') {
+      report('MARKET SWITCH FAILED', undefined, { direction, reason: 'Market switch already in progress' });
+      return;
+    }
+    if (!selectedMarketStart) {
+      report('MARKET SWITCH FAILED', undefined, { direction, reason: 'Current market is not ready' });
+      return;
+    }
+    const targetStart = selectedMarketStart + (direction === 'NEXT' ? MARKET_SECONDS : -MARKET_SECONDS);
+    clearTimeout(rotation);
+    rotation = undefined;
+    report('MARKET SWITCHING', undefined, { direction,
+      targetMarket: `btc-updown-5m-${targetStart}` });
+    void selectAutomaticMarket(false, 0, targetStart, direction);
+  }
+
   async function selectConfiguredMarket(): Promise<void> {
     maintenance = true;
     const prepared = await prepareToken(configuredTokenId);
     finishPreparation([configuredTokenId], configuredTokenId,
       [{ assetId: configuredTokenId, ...prepared }]);
-    report('MARKET SELECTED', undefined, { mode: 'MANUAL', tokenId: configuredTokenId, minOrderSize });
+    report('MARKET SELECTED', undefined, { mode: 'MANUAL', tokenId: configuredTokenId, minOrderSize,
+      market: 'CUSTOM', session: null });
   }
 
   function requestOutcomeToggle(): void {
@@ -716,7 +830,11 @@ async function main(): Promise<void> {
   process.stdin.on('keypress', (text, key) => {
     const input = now();
     if (key?.ctrl && key.name === 'c') { stop(); return; }
-    if (key?.name === 'tab') {
+    if (key?.name === 'left') {
+      requestMarketStep('PREVIOUS');
+    } else if (key?.name === 'right') {
+      requestMarketStep('NEXT');
+    } else if (key?.name === 'tab') {
       requestOutcomeToggle();
     } else if (text === 'a') {
       if (armed) {
@@ -751,9 +869,12 @@ async function main(): Promise<void> {
   }
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
-  report('READY', undefined, { live, tick, account: 'EOA', keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN',
+  report('READY', undefined, { live, tick, account: 'EOA',
+    keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN Left=previous Right=next',
     orderSize, orderSizeUnit, minOrderSize, autoFindMarket, marketOutcome,
-    autoSellProfitPercent, buySlippageEnabled, sellSlippageEnabled });
+    autoSellProfitPercent, buySlippageEnabled, sellSlippageEnabled,
+    market: selectedMarketSlug || null,
+    session: selectedMarketStart ? formatSessionRange(selectedMarketStart) : null });
 }
 
 main().catch(error => {
