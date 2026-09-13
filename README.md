@@ -21,7 +21,7 @@ ORDER_SIZE=1
 ORDER_SIZE_UNIT=USD
 
 # ===== 自动卖出 =====
-AUTO_SELL_TRIGGER=0.90
+AUTO_SELL_PROFIT_PERCENT=20
 
 # ===== 成交价格与滑点 =====
 BUY_SLIPPAGE_ENABLED=true
@@ -52,13 +52,13 @@ npm run build
 | PRIVATE_KEY | 本地 EOA 私钥，0x + 64 位十六进制 |
 | ORDER_SIZE | 每次按键或自动 SELL 使用的固定大小 |
 | ORDER_SIZE_UNIT | `USD` 表示美元目标金额；`SHARES` 表示 token 份额 |
-| AUTO_SELL_TRIGGER | bid 触发阈值，例如 0.90 = 90¢ |
+| AUTO_SELL_PROFIT_PERCENT | 相对本程序本次平均买入价的盈利百分比，例如 20 = 上涨 20% |
 | BUY_SLIPPAGE_ENABLED | BUY 是否使用滑点限制；`false` 时有卖单就立即尝试买入 |
 | SELL_SLIPPAGE_ENABLED | SELL 是否使用滑点限制；`false` 时有买单就立即尝试卖出 |
 | BUY_SLIPPAGE / SELL_SLIPPAGE | 绝对价格增减，例如 0.01 = 1¢，默认 0 |
 | LIVE_TRADING | 默认 false；只接受 true / false |
 
-`b` BUY，`s` SELL，`a` armed/disarmed，`Tab` 在 Bitcoin 五分钟的 UP/DOWN 间切换，Ctrl+C 退出。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出从 armed 后的下一条有效报价开始判断，`bestBid >= AUTO_SELL_TRIGGER` 时触发一次，立即 disarm；它也使用同一个 `ORDER_SIZE`。再次自动卖出需要重新按 `a`，包括下单失败之后。启动时 disarmed。一次只允许一笔在途订单；忙碌时手动输入报错，不排队。切换 UP/DOWN 会 disarm；其他市场只有输入的一个 Token，因此不响应 Tab 切换。
+`b` BUY，`s` SELL，`a` armed/disarmed，`Tab` 在 Bitcoin 五分钟的 UP/DOWN 间切换，Ctrl+C 退出。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出使用本次运行中由程序买入的加权平均成本；例如平均买入价 0.50、`AUTO_SELL_PROFIT_PERCENT=20`，目标价就是 0.60。当 `bestBid` 达到目标时触发一次并立即 disarm；它也使用同一个 `ORDER_SIZE`。按 `a` 时若当前 Token 尚无本次买入记录，程序会显示 `ARM FAILED`。切换 UP/DOWN 会 disarm，并为两个 Token 分别保留本期内的买入成本；进入下一期市场后重新计算。
 
 `ORDER_SIZE_UNIT=USD` 时，BUY 的 `ORDER_SIZE` 是美元名义金额（手续费可能另计）；SELL 会在触发时用 `ORDER_SIZE / bestBid` 换算卖出份额，所以它代表按当前最优买价计算的目标美元金额。FAK 可能只成交一部分，且启用 SELL slippage 时成交价可能低于触发时的 bestBid，因此实际卖出收入不保证刚好等于 `ORDER_SIZE`。`ORDER_SIZE_UNIT=SHARES` 时，BUY 和 SELL 都以固定 token 份额为目标；SDK 的 BUY 接口仍接收美元，因此程序用份额乘本次 BUY 限价换算签名金额。
 
@@ -87,14 +87,14 @@ SELL：内存 `bestBid - SELL_SLIPPAGE` → tick 对齐 / clamp → `minPrice` +
 
 手动订单用键盘 callback 作为 input 起点，WS 相关指标为 null，避免把用户思考时间算作行情延迟。Dry run 用 `dry_dispatch_ns`、`dry_*_to_dispatch_us/ms` 记录签名后的模拟发送边界，真实 post/response 指标为 null。`postOrder` 调用时间不是 socket 实际写出时间。
 
-普通行情不打印。订单/触发日志通过 `setImmediate` 延后格式化输出，不在发送前同步写日志；连接、armed 状态与停止交易原因只在状态变化时输出。
+普通行情不打印。订单日志中的 `quotePrice` 是按键或触发时的当前 `bestAsk`/`bestBid`，`limitPrice` 是订单允许的最差价格。订单/触发日志通过 `setImmediate` 延后格式化输出，不在发送前同步写日志；连接、armed 状态与停止交易原因只在状态变化时输出。
 
 ## SDK 边界与限制
 
 - SDK 的显式价格路径仍使用内部 metadata 缓存。固定版本缓存 TTL 为 10 分钟，本程序在预热开始后 9 分钟停止交易；tick size 变化也停止交易，需要重启。运行阶段的 fetch 保护只放行真实模式下的 `POST /order`，禁止隐含 REST 查价/查 market。不会在热路径刷新 metadata。
 - 新官方 SDK 自身包含 Zod/ky 等依赖及内部校验。这是“使用当前官方 SDK”和“完全不使用 Zod”之间的实际冲突；应用源码无 Zod、schema 库或额外 HTTP client。未修改 SDK 内部实现来绕过校验。
 - 只支持私钥对应的 EOA 资金/持仓；不配置 proxy、Safe 或 deposit wallet。资金、token 持仓与链上授权需预先准备，本程序不发送授权交易。
-- 用户负责指定正确市场；没有自动发现、5 分钟滚动切换、仓位查询、完整深度、成交追踪、重试或结算。失败/超时不自动重发；请求可能已被接受，应检查交易所状态后再操作。
+- 自动盈利目标只统计本程序当前运行期间提交并成功返回的 BUY，不读取启动前、网页或其他程序的持仓；重启和进入下一期市场会清空成本记录。目标计算暂不扣手续费。没有仓位查询、完整深度、重试或结算；失败/超时不自动重发。
 - 不保证某个延迟或成交价格优于配置上限；需自行测量实际部署环境。事件循环调度、SDK 签名与网络耗时都仍然存在。
 
 ## 本次验证

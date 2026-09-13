@@ -39,7 +39,7 @@ ORDER_SIZE=1
 ORDER_SIZE_UNIT=USD
 
 # ===== 自动卖出 =====
-AUTO_SELL_TRIGGER=0.90
+AUTO_SELL_PROFIT_PERCENT=20
 
 # ===== 买入价格设置 =====
 BUY_SLIPPAGE_ENABLED=true
@@ -107,14 +107,14 @@ ORDER_SIZE_UNIT=SHARES
 ### 自动卖出
 
 ```ini
-AUTO_SELL_TRIGGER=0.90
+AUTO_SELL_PROFIT_PERCENT=20
 ```
 
-`0.90` 表示 90¢。
+`20` 表示盈利目标为 20%。例如本程序本次买入的平均价格是 50¢，自动卖出目标就是 60¢。
 
-按 `a` 开启自动卖出后，当市场上有人愿意以 90¢ 或更高价格买入你的 Token 时，程序会尝试卖出一次。
+先用程序按 `b` 买入，再按 `a` 开启自动卖出。当当前最高买价达到目标价时，程序会尝试卖出一次。没有本次买入记录时按 `a` 会显示 `ARM FAILED`。
 
-触发一次后会自动关闭。想再次自动卖出，需要再按一次 `a`。
+程序为 UP 和 DOWN 分别记录本次运行中的平均买入成本。它不会读取启动前、网页或其他程序买入的持仓；重启或进入下一期市场后会重新计算。盈利目标暂时不扣手续费。触发一次后会自动关闭，想再次自动卖出需要再按一次 `a`。
 
 ### BUY 滑点
 
@@ -170,7 +170,7 @@ SELL_SLIPPAGE=0
 
 程序一次只处理一笔订单。上一笔还没完成时继续按键，新的订单不会排队。
 
-选择 Bitcoin 五分钟后，可以随时按 `Tab` 切换方向。程序会立即显示 `OUTCOME SWITCHED`，不需要重新连接。切换会关闭当前自动卖出 armed 状态；需要自动卖出时再按一次 `a`。
+选择 Bitcoin 五分钟后，可以随时按 `Tab` 切换方向。程序会立即显示 `CURRENT TOKEN`，其中包括方向、完整 Token ID、当前 `bestBid`、`bestAsk`、平均买入价和自动卖出目标价。切换不需要重新连接，并会关闭当前自动卖出 armed 状态；需要自动卖出时再按一次 `a`。
 
 选择“其他市场”时，程序只有你输入的一个 Token ID，因此 `Tab` 不切换品种。
 
@@ -225,7 +225,7 @@ UP 和 DOWN 是两个不同 Token。填错 `TOKEN_ID` 会直接交易错误方�
 ```ini
 ORDER_SIZE=1
 ORDER_SIZE_UNIT=USD
-AUTO_SELL_TRIGGER=0.90
+AUTO_SELL_PROFIT_PERCENT=20
 
 MARKET_OUTCOME=UP
 
@@ -241,8 +241,8 @@ LIVE_TRADING=false
 
 1. 启动后确认看到 `READY`。
 2. 按 `b`，应看到 `DRY RUN BUY`。
-3. 按 `s`，应看到 `DRY RUN SELL`。
-4. 按 `a`，应看到 `ARMED`。
+3. 按 `a`，应看到 `ARMED` 和根据模拟买入价算出的目标价。
+4. 再按 `a` 关闭自动卖出，然后按 `s`，应看到 `DRY RUN SELL`。
 5. 确认操作和价格正确后再考虑真实模式。
 
 ## 8. 常见问题
@@ -255,6 +255,10 @@ LIVE_TRADING=false
 
 常见原因：当前没有可成交订单、价格已经变化、滑点太严格、FAK 可成交数量为零、余额或持仓不足、填错 Token ID，或者仍处于模拟模式。
 
+### 为什么日志中的 SELL limitPrice 是 0.01？
+
+这是关闭 SELL 滑点保护时使用的最低可接受限价，不代表当前盘口价或预计成交价。建议使用 `SELL_SLIPPAGE_ENABLED=true` 和 `SELL_SLIPPAGE=0`，这样 SELL 限价就是按键时的当前最高买价。日志中的 `quotePrice` 是当前盘口价，`limitPrice` 是允许的最差价格。
+
 ### 为什么自动卖出只执行一次？
 
 每次按 `a` 只开启一次。触发后自动关闭，避免连续重复卖出。
@@ -265,8 +269,8 @@ LIVE_TRADING=false
 
 ## 9. 当前没有的功能
 
-- 不会自动切换 UP 和 DOWN。
 - 不显示账户余额和持仓。
+- 不读取本次启动前的买入成本。
 - 不显示完整盘口。
 - 不统计盈亏。
 - 不保证订单全部成交。

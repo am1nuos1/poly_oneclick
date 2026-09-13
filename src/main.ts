@@ -119,6 +119,7 @@ type Trace = {
 
 type MarketOutcome = 'UP' | 'DOWN';
 type Quote = { bid: number; ask: number; received: bigint };
+type CostBasis = { shares: number; cost: number };
 
 // Formatting and console I/O happen on a later turn, never before order dispatch.
 function report(event: string, trace?: Trace, detail?: object): void {
@@ -157,7 +158,7 @@ async function main(): Promise<void> {
   if (orderSizeUnit !== 'USD' && orderSizeUnit !== 'SHARES') {
     throw fault('Invalid ORDER_SIZE_UNIT; use USD or SHARES');
   }
-  const trigger = numeric('AUTO_SELL_TRIGGER', 0.0001, 0.9999);
+  const autoSellProfitPercent = numeric('AUTO_SELL_PROFIT_PERCENT', 0, 100_000);
   const buySlippageEnabled = boolean('BUY_SLIPPAGE_ENABLED', true);
   const sellSlippageEnabled = boolean('SELL_SLIPPAGE_ENABLED', true);
   const buySlippage = numeric('BUY_SLIPPAGE', 0, 0.9999, 0);
@@ -209,6 +210,7 @@ async function main(): Promise<void> {
   let marketAssets: Partial<Record<MarketOutcome, string>> = {};
   const tokenTicks = new Map<string, number>();
   const quotes = new Map<string, Quote>();
+  const costBasisByToken = new Map<string, CostBasis>();
   let activeSelection = 0;
   let tick = NaN;
   let cacheDeadline = 0n;
@@ -226,6 +228,54 @@ async function main(): Promise<void> {
   let rotation: NodeJS.Timeout | undefined;
   let lastPong = 0;
   let lastQuote = 0n;
+
+  function entryPriceFor(assetId = tokenId): number | undefined {
+    const basis = costBasisByToken.get(assetId);
+    if (!basis || basis.shares <= 0 || basis.cost <= 0) return undefined;
+    return basis.cost / basis.shares;
+  }
+
+  function autoSellTargetFor(assetId = tokenId): number | undefined {
+    const entryPrice = entryPriceFor(assetId);
+    return entryPrice === undefined ? undefined : entryPrice * (1 + autoSellProfitPercent / 100);
+  }
+
+  function recordBuy(assetId: string, shares: number, cost: number): void {
+    if (!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(cost) || cost <= 0) return;
+    const previous = costBasisByToken.get(assetId);
+    costBasisByToken.set(assetId, {
+      shares: (previous?.shares ?? 0) + shares,
+      cost: (previous?.cost ?? 0) + cost,
+    });
+  }
+
+  function recordSell(assetId: string, shares: number): void {
+    const previous = costBasisByToken.get(assetId);
+    if (!previous || !Number.isFinite(shares) || shares <= 0) return;
+    const remainingShares = previous.shares - shares;
+    if (remainingShares <= 1e-12) {
+      costBasisByToken.delete(assetId);
+      return;
+    }
+    costBasisByToken.set(assetId, {
+      shares: remainingShares,
+      cost: previous.cost * remainingShares / previous.shares,
+    });
+  }
+
+  function tokenDetail(): object {
+    const entryPrice = entryPriceFor();
+    const autoSellTarget = autoSellTargetFor();
+    return {
+      outcome: autoFindMarket ? marketOutcome : 'CUSTOM',
+      tokenId,
+      bestBid: Number.isFinite(bestBid) ? bestBid : null,
+      bestAsk: Number.isFinite(bestAsk) ? bestAsk : null,
+      entryPrice: entryPrice ?? null,
+      autoSellProfitPercent,
+      autoSellTarget: autoSellTarget ?? null,
+    };
+  }
 
   async function prepareToken(assetId: string): Promise<{ tick: number; deadline: bigint }> {
     const preparedTick = await fetchTickSize(client, { assetId });
@@ -324,6 +374,7 @@ async function main(): Promise<void> {
       }
       if (stopped) return;
       marketAssets = selected.assets;
+      costBasisByToken.clear();
       finishPreparation(
         [selected.assets.UP, selected.assets.DOWN],
         selected.assets[marketOutcome],
@@ -335,7 +386,8 @@ async function main(): Promise<void> {
       const nextChangeMs = (selected.start + MARKET_SECONDS) * 1000 - Date.now() + 100;
       rotation = setTimeout(() => { void selectAutomaticMarket(false); }, Math.max(100, nextChangeMs));
       report('MARKET SELECTED', undefined, { mode: 'AUTO', outcome: marketOutcome,
-        market: selected.slug, endsAt: new Date((selected.start + MARKET_SECONDS) * 1000).toISOString() });
+        tokenId: selected.assets[marketOutcome], market: selected.slug,
+        endsAt: new Date((selected.start + MARKET_SECONDS) * 1000).toISOString() });
     } catch (error) {
       maintenance = false;
       const reason = error instanceof Error && error.name === 'ExecutorError'
@@ -356,7 +408,7 @@ async function main(): Promise<void> {
     const prepared = await prepareToken(configuredTokenId);
     finishPreparation([configuredTokenId], configuredTokenId,
       [{ assetId: configuredTokenId, ...prepared }]);
-    report('MARKET SELECTED', undefined, { mode: 'MANUAL' });
+    report('MARKET SELECTED', undefined, { mode: 'MANUAL', tokenId: configuredTokenId });
   }
 
   function requestOutcomeToggle(): void {
@@ -383,7 +435,7 @@ async function main(): Promise<void> {
     bestBid = quote?.bid ?? NaN;
     bestAsk = quote?.ask ?? NaN;
     lastQuote = quote?.received ?? 0n;
-    report('OUTCOME SWITCHED', undefined, { outcome: marketOutcome });
+    report('CURRENT TOKEN', undefined, tokenDetail());
   }
 
   function invalidate(reason: string): void {
@@ -409,6 +461,7 @@ async function main(): Promise<void> {
     trace.invoke = now();
     const connection = socket;
     let price: number | undefined;
+    let quotePrice: number | undefined;
     let ownsLock = false;
     try {
       if (busy) throw fault('Another order is in flight');
@@ -417,8 +470,8 @@ async function main(): Promise<void> {
       if (socket.readyState !== WebSocket.OPEN || !lastQuote || trace.invoke - lastQuote > 5_000_000_000n) {
         throw fault('No fresh WebSocket quote');
       }
-      const quote = side === OrderSide.BUY ? bestAsk : bestBid;
-      if (!Number.isFinite(quote) || quote <= 0 || quote >= 1) throw fault('Requested book side is empty');
+      quotePrice = side === OrderSide.BUY ? bestAsk : bestBid;
+      if (!Number.isFinite(quotePrice) || quotePrice <= 0 || quotePrice >= 1) throw fault('Requested book side is empty');
       if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > bestAsk) throw fault('Crossed quote');
       const selection = activeSelection;
       const assetId = tokenId;
@@ -453,7 +506,14 @@ async function main(): Promise<void> {
       if (!live) {
         // Dispatch boundary only, NOT a real postOrder timestamp or HTTP latency.
         const dryDispatch = now();
-        report(`DRY RUN ${side}`, trace, { price, orderType: 'FAK',
+        if (side === OrderSide.BUY) {
+          const simulatedShares = orderSizeUnit === 'SHARES' ? orderSize : submittedAmount / quotePrice;
+          recordBuy(assetId, simulatedShares, simulatedShares * quotePrice);
+        } else {
+          recordSell(assetId, submittedAmount);
+        }
+        report(`DRY RUN ${side}`, trace, { tokenId: assetId, quotePrice, limitPrice: price,
+          orderType: 'FAK',
           configuredSize: orderSize, configuredUnit: orderSizeUnit,
           submittedAmount, submittedUnit,
           dry_dispatch_ns: dryDispatch.toString(),
@@ -467,19 +527,35 @@ async function main(): Promise<void> {
       }
       trace.post = now();
       const pending = client.postOrder(order);
-      report(`${trace.source} ${side}`, { ...trace }, { price, orderType: 'FAK',
+      report(`${trace.source} ${side}`, { ...trace }, { tokenId: assetId,
+        quotePrice, limitPrice: price, orderType: 'FAK',
         configuredSize: orderSize, configuredUnit: orderSizeUnit,
         submittedAmount, submittedUnit });
       const response = await pending;
       trace.response = now();
+      let averageFillPrice: number | undefined;
+      if (response.ok) {
+        const makingAmount = Number(response.makingAmount);
+        const takingAmount = Number(response.takingAmount);
+        if (makingAmount > 0 && takingAmount > 0) {
+          if (side === OrderSide.BUY) {
+            recordBuy(assetId, takingAmount, makingAmount);
+            averageFillPrice = makingAmount / takingAmount;
+          } else {
+            recordSell(assetId, makingAmount);
+            averageFillPrice = takingAmount / makingAmount;
+          }
+        }
+      }
       report(response.ok ? 'ORDER SUCCESS' : 'ORDER FAILED', trace,
-        response.ok ? { side, price, orderId: response.orderId, status: response.status,
+        response.ok ? { side, tokenId: assetId, quotePrice, limitPrice: price,
+          averageFillPrice, orderId: response.orderId, status: response.status,
           makingAmount: response.makingAmount, takingAmount: response.takingAmount }
-          : { side, price, code: response.code });
+          : { side, tokenId: assetId, quotePrice, limitPrice: price, code: response.code });
     } catch (error) {
       if (trace.post !== undefined && trace.response === undefined) trace.response = now();
       // Never print SDK errors wholesale: they can contain requests/auth headers.
-      report('ORDER FAILED', trace, { side, price,
+      report('ORDER FAILED', trace, { side, tokenId, quotePrice, limitPrice: price,
         reason: error instanceof Error && error.name === 'ExecutorError' ? error.message : 'SDK request/signing failed',
         outcome: trace.post === undefined ? 'not submitted' : 'check exchange; no automatic retry' });
     } finally {
@@ -553,7 +629,9 @@ async function main(): Promise<void> {
 
   function handle(item: any, received: bigint, parsed: bigint): void {
     if (!update(item, received)) return;
-    const fire = armed && !busy && !blocked && bestBid >= trigger;
+    const targetPrice = autoSellTargetFor();
+    const fire = armed && !busy && !blocked
+      && targetPrice !== undefined && bestBid >= targetPrice;
     const judged = now();
     if (fire) {
       armed = false;
@@ -611,8 +689,19 @@ async function main(): Promise<void> {
     if (key?.name === 'tab') {
       requestOutcomeToggle();
     } else if (text === 'a') {
-      armed = !blocked && !armed;
-      report(armed ? 'ARMED' : 'DISARMED');
+      if (armed) {
+        armed = false;
+        report('DISARMED', undefined, tokenDetail());
+      } else if (blocked) {
+        report('ARM FAILED', undefined, { reason: blocked, ...tokenDetail() });
+      } else if (entryPriceFor() === undefined) {
+        report('ARM FAILED', undefined, {
+          reason: 'No BUY entry recorded for current token in this run', ...tokenDetail(),
+        });
+      } else {
+        armed = true;
+        report('ARMED', undefined, tokenDetail());
+      }
     } else if (text === 'b' || text === 's') {
       const side = text === 'b' ? OrderSide.BUY : OrderSide.SELL;
       void execute(side, { source: 'MANUAL', input, trigger: now() });
@@ -634,7 +723,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', stop);
   report('READY', undefined, { live, tick, account: 'EOA', keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN',
     orderSize, orderSizeUnit, autoFindMarket, marketOutcome,
-    buySlippageEnabled, sellSlippageEnabled });
+    autoSellProfitPercent, buySlippageEnabled, sellSlippageEnabled });
 }
 
 main().catch(error => {
