@@ -58,7 +58,7 @@ npm run build
 | BUY_SLIPPAGE / SELL_SLIPPAGE | 绝对价格增减，例如 0.01 = 1¢，默认 0 |
 | LIVE_TRADING | 默认 false；只接受 true / false |
 
-`b` BUY，`s` SELL，`a` armed/disarmed，Ctrl+C 退出。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出从 armed 后的下一条有效报价开始判断，`bestBid >= AUTO_SELL_TRIGGER` 时触发一次，立即 disarm；它也使用同一个 `ORDER_SIZE`。再次自动卖出需要重新按 `a`，包括下单失败之后。启动时 disarmed。一次只允许一笔在途订单；忙碌时手动输入报错，不排队。
+`b` BUY，`s` SELL，`a` armed/disarmed，`Tab` 在 Bitcoin 五分钟的 UP/DOWN 间切换，Ctrl+C 退出。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出从 armed 后的下一条有效报价开始判断，`bestBid >= AUTO_SELL_TRIGGER` 时触发一次，立即 disarm；它也使用同一个 `ORDER_SIZE`。再次自动卖出需要重新按 `a`，包括下单失败之后。启动时 disarmed。一次只允许一笔在途订单；忙碌时手动输入报错，不排队。切换 UP/DOWN 会 disarm；其他市场只有输入的一个 Token，因此不响应 Tab 切换。
 
 `ORDER_SIZE_UNIT=USD` 时，BUY 的 `ORDER_SIZE` 是美元名义金额（手续费可能另计）；SELL 会在触发时用 `ORDER_SIZE / bestBid` 换算卖出份额，所以它代表按当前最优买价计算的目标美元金额。FAK 可能只成交一部分，且启用 SELL slippage 时成交价可能低于触发时的 bestBid，因此实际卖出收入不保证刚好等于 `ORDER_SIZE`。`ORDER_SIZE_UNIT=SHARES` 时，BUY 和 SELL 都以固定 token 份额为目标；SDK 的 BUY 接口仍接收美元，因此程序用份额乘本次 BUY 限价换算签名金额。
 

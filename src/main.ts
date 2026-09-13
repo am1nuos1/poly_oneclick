@@ -167,7 +167,7 @@ async function main(): Promise<void> {
   process.stdin.resume();
   const marketChoice = await chooseOption('选择市场', ['Bitcoin 五分钟', '其他市场']);
   const autoFindMarket = marketChoice === 0;
-  const marketOutcome = (process.env.MARKET_OUTCOME ?? 'UP').trim().toUpperCase();
+  let marketOutcome = (process.env.MARKET_OUTCOME ?? 'UP').trim().toUpperCase();
   if (marketOutcome !== 'UP' && marketOutcome !== 'DOWN') {
     throw fault('Invalid MARKET_OUTCOME; use UP or DOWN');
   }
@@ -217,6 +217,7 @@ async function main(): Promise<void> {
   let rotation: NodeJS.Timeout | undefined;
   let lastPong = 0;
   let lastQuote = 0n;
+  let outcomeToggleQueued = false;
 
   async function prepareToken(assetId: string): Promise<{ tick: number; deadline: bigint }> {
     const preparedTick = await fetchTickSize(client, { assetId });
@@ -302,6 +303,7 @@ async function main(): Promise<void> {
       rotation = setTimeout(() => { void selectAutomaticMarket(false); }, Math.max(100, nextChangeMs));
       report('MARKET SELECTED', undefined, { mode: 'AUTO', outcome: marketOutcome,
         market: selected.slug, endsAt: new Date((selected.start + MARKET_SECONDS) * 1000).toISOString() });
+      if (outcomeToggleQueued) setImmediate(() => { void applyOutcomeToggle(); });
     } catch (error) {
       maintenance = false;
       const reason = error instanceof Error && error.name === 'ExecutorError'
@@ -322,6 +324,32 @@ async function main(): Promise<void> {
     const prepared = await prepareToken(configuredTokenId);
     finishPreparation(configuredTokenId, prepared);
     report('MARKET SELECTED', undefined, { mode: 'MANUAL' });
+  }
+
+  function requestOutcomeToggle(): void {
+    if (!autoFindMarket) {
+      report('TAB SWITCH UNAVAILABLE', undefined, { reason: 'Only available for Bitcoin five-minute market' });
+      return;
+    }
+    outcomeToggleQueued = !outcomeToggleQueued;
+    if (!outcomeToggleQueued) {
+      report('OUTCOME SWITCH CANCELLED');
+      return;
+    }
+    if (busy || blocked === 'Changing BTC 5-minute market') {
+      report('OUTCOME SWITCH QUEUED');
+      return;
+    }
+    setImmediate(() => { void applyOutcomeToggle(); });
+  }
+
+  async function applyOutcomeToggle(): Promise<void> {
+    if (!outcomeToggleQueued || busy || blocked === 'Changing BTC 5-minute market') return;
+    outcomeToggleQueued = false;
+    marketOutcome = marketOutcome === 'UP' ? 'DOWN' : 'UP';
+    clearTimeout(rotation);
+    report('SWITCHING OUTCOME', undefined, { outcome: marketOutcome });
+    await selectAutomaticMarket(false);
   }
 
   function invalidate(reason: string): void {
@@ -419,6 +447,7 @@ async function main(): Promise<void> {
     } finally {
       // A rejected overlapping keypress must not release the active order's lock.
       if (ownsLock) busy = false;
+      if (!busy && outcomeToggleQueued) setImmediate(() => { void applyOutcomeToggle(); });
     }
   }
 
@@ -526,7 +555,9 @@ async function main(): Promise<void> {
   process.stdin.on('keypress', (text, key) => {
     const input = now();
     if (key?.ctrl && key.name === 'c') { stop(); return; }
-    if (text === 'a') {
+    if (key?.name === 'tab') {
+      requestOutcomeToggle();
+    } else if (text === 'a') {
       armed = !blocked && !armed;
       report(armed ? 'ARMED' : 'DISARMED');
     } else if (text === 'b' || text === 's') {
@@ -548,7 +579,7 @@ async function main(): Promise<void> {
   }
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
-  report('READY', undefined, { live, tick, account: 'EOA', keys: 'b=BUY s=SELL a=arm/disarm',
+  report('READY', undefined, { live, tick, account: 'EOA', keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN',
     orderSize, orderSizeUnit, autoFindMarket, marketOutcome,
     buySlippageEnabled, sellSlippageEnabled });
 }
