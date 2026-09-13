@@ -17,7 +17,7 @@ PRIVATE_KEY=0x你的64位十六进制私钥
 # 市场在启动菜单选择；其他市场的 Token ID 在启动时输入
 
 # ===== 每次订单大小 =====
-ORDER_SIZE=1
+ORDER_SIZE=5
 ORDER_SIZE_UNIT=USD
 
 # ===== 自动卖出 =====
@@ -50,7 +50,7 @@ npm run build
 | --- | --- |
 | MARKET_OUTCOME | 选择 Bitcoin 五分钟时交易 `UP` 或 `DOWN` |
 | PRIVATE_KEY | 本地 EOA 私钥，0x + 64 位十六进制 |
-| ORDER_SIZE | 每次按键或自动 SELL 使用的固定大小 |
+| ORDER_SIZE | 每次按键或自动 SELL 使用的固定大小；必须满足当前市场最小份额 |
 | ORDER_SIZE_UNIT | `USD` 表示美元目标金额；`SHARES` 表示 token 份额 |
 | AUTO_SELL_PROFIT_PERCENT | 相对本程序本次平均买入价的盈利百分比，例如 20 = 上涨 20% |
 | BUY_SLIPPAGE_ENABLED | BUY 是否使用滑点限制；`false` 时有卖单就立即尝试买入 |
@@ -61,6 +61,8 @@ npm run build
 `b` BUY，`s` SELL，`a` armed/disarmed，`Tab` 在 Bitcoin 五分钟的 UP/DOWN 间切换，Ctrl+C 退出。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出使用本次运行中由程序买入的加权平均成本；例如平均买入价 0.50、`AUTO_SELL_PROFIT_PERCENT=20`，目标价就是 0.60。当 `bestBid` 达到目标时触发一次并立即 disarm；它也使用同一个 `ORDER_SIZE`。按 `a` 时若当前 Token 尚无本次买入记录，程序会显示 `ARM FAILED`。切换 UP/DOWN 会 disarm，并为两个 Token 分别保留本期内的买入成本；进入下一期市场后重新计算。
 
 `ORDER_SIZE_UNIT=USD` 时，BUY 的 `ORDER_SIZE` 是美元名义金额（手续费可能另计）；SELL 会在触发时用 `ORDER_SIZE / bestBid` 换算卖出份额，所以它代表按当前最优买价计算的目标美元金额。FAK 可能只成交一部分，且启用 SELL slippage 时成交价可能低于触发时的 bestBid，因此实际卖出收入不保证刚好等于 `ORDER_SIZE`。`ORDER_SIZE_UNIT=SHARES` 时，BUY 和 SELL 都以固定 token 份额为目标；SDK 的 BUY 接口仍接收美元，因此程序用份额乘本次 BUY 限价换算签名金额。
+
+程序启动时读取当前 Token 的最小订单份额并保存在内存中。BTC 五分钟市场当前通常要求至少 5 份；例如价格 0.59 时，1 美元只能换算成约 1.6949 份，程序会拒绝该订单，不会自动增加金额。希望固定金额可使用 `ORDER_SIZE=5`、`ORDER_SIZE_UNIT=USD`；希望固定份额可使用 `ORDER_SIZE=5`、`ORDER_SIZE_UNIT=SHARES`。
 
 ## 订单路径
 
@@ -91,7 +93,7 @@ SELL：内存 `bestBid - SELL_SLIPPAGE` → tick 对齐 / clamp → `minPrice` +
 
 ## SDK 边界与限制
 
-- SDK 的显式价格路径仍使用内部 metadata 缓存。固定版本缓存 TTL 为 10 分钟，本程序在预热开始后 9 分钟停止交易；tick size 变化也停止交易，需要重启。运行阶段的 fetch 保护只放行真实模式下的 `POST /order`，禁止隐含 REST 查价/查 market。不会在热路径刷新 metadata。
+- 启动阶段读取一次 Token 的 tick 和最小订单份额；之后的行情只使用 WebSocket。SDK 的显式价格路径仍使用内部 metadata 缓存。固定版本缓存 TTL 为 10 分钟，本程序在预热开始后 9 分钟停止交易；tick size 变化也停止交易，需要重启。运行阶段的 fetch 保护只放行真实模式下的 `POST /order`，禁止隐含 REST 查价/查 market。
 - 新官方 SDK 自身包含 Zod/ky 等依赖及内部校验。这是“使用当前官方 SDK”和“完全不使用 Zod”之间的实际冲突；应用源码无 Zod、schema 库或额外 HTTP client。未修改 SDK 内部实现来绕过校验。
 - 只支持私钥对应的 EOA 资金/持仓；不配置 proxy、Safe 或 deposit wallet。资金、token 持仓与链上授权需预先准备，本程序不发送授权交易。
 - 自动盈利目标只统计本程序当前运行期间提交并成功返回的 BUY，不读取启动前、网页或其他程序的持仓；重启和进入下一期市场会清空成本记录。目标计算暂不扣手续费。没有仓位查询、完整深度、重试或结算；失败/超时不自动重发。

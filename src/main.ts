@@ -1,6 +1,6 @@
 import { createSecureClient, OrderSide, OrderType } from '@polymarket/client';
 import { privateKey } from '@polymarket/client/viem';
-import { fetchTickSize } from '@polymarket/client/actions';
+import { fetchOrderBook } from '@polymarket/client/actions';
 import WebSocket from 'ws';
 import { emitKeypressEvents } from 'node:readline';
 
@@ -209,10 +209,12 @@ async function main(): Promise<void> {
   let subscribedTokenIds = configuredTokenId ? [configuredTokenId] : [];
   let marketAssets: Partial<Record<MarketOutcome, string>> = {};
   const tokenTicks = new Map<string, number>();
+  const tokenMinOrderSizes = new Map<string, number>();
   const quotes = new Map<string, Quote>();
   const costBasisByToken = new Map<string, CostBasis>();
   let activeSelection = 0;
   let tick = NaN;
+  let minOrderSize = NaN;
   let cacheDeadline = 0n;
   let bestBid: number = NaN;
   let bestAsk: number = NaN;
@@ -271,14 +273,23 @@ async function main(): Promise<void> {
       tokenId,
       bestBid: Number.isFinite(bestBid) ? bestBid : null,
       bestAsk: Number.isFinite(bestAsk) ? bestAsk : null,
+      minOrderSize,
       entryPrice: entryPrice ?? null,
       autoSellProfitPercent,
       autoSellTarget: autoSellTarget ?? null,
     };
   }
 
-  async function prepareToken(assetId: string): Promise<{ tick: number; deadline: bigint }> {
-    const preparedTick = await fetchTickSize(client, { assetId });
+  async function prepareToken(assetId: string): Promise<{
+    tick: number; minOrderSize: number; deadline: bigint;
+  }> {
+    // One startup-only metadata read. Quotes still come exclusively from WebSocket.
+    const book = await fetchOrderBook(client, { assetId });
+    const preparedTick = book.tickSize;
+    const preparedMinOrderSize = Number(book.minOrderSize);
+    if (!Number.isFinite(preparedMinOrderSize) || preparedMinOrderSize <= 0) {
+      throw fault('Invalid market minimum order size');
+    }
     const cacheStarted = now();
     // Sign and discard to warm the SDK metadata and both signing paths.
     await client.createMarketOrder({ assetId, side: OrderSide.BUY,
@@ -287,7 +298,11 @@ async function main(): Promise<void> {
     await client.createMarketOrder({ assetId, side: OrderSide.SELL,
       shares: orderSizeUnit === 'SHARES' ? orderSize : orderSize / 0.5,
       minPrice: 0.5, orderType: OrderType.FAK });
-    return { tick: preparedTick, deadline: cacheStarted + 540_000_000_000n };
+    return {
+      tick: preparedTick,
+      minOrderSize: preparedMinOrderSize,
+      deadline: cacheStarted + 540_000_000_000n,
+    };
   }
 
   function readStringArray(raw: unknown): string[] {
@@ -332,18 +347,23 @@ async function main(): Promise<void> {
   function finishPreparation(
     assetIds: string[],
     activeAssetId: string,
-    preparedTokens: Array<{ assetId: string; tick: number; deadline: bigint }>,
+    preparedTokens: Array<{
+      assetId: string; tick: number; minOrderSize: number; deadline: bigint;
+    }>,
   ): void {
     subscribedTokenIds = assetIds;
     tokenTicks.clear();
+    tokenMinOrderSizes.clear();
     cacheDeadline = preparedTokens[0]?.deadline ?? 0n;
     for (const prepared of preparedTokens) {
       tokenTicks.set(prepared.assetId, prepared.tick);
+      tokenMinOrderSizes.set(prepared.assetId, prepared.minOrderSize);
       if (prepared.deadline < cacheDeadline) cacheDeadline = prepared.deadline;
     }
     quotes.clear();
     tokenId = activeAssetId;
     tick = tokenTicks.get(activeAssetId) ?? NaN;
+    minOrderSize = tokenMinOrderSizes.get(activeAssetId) ?? NaN;
     activeSelection++;
     bestBid = bestAsk = NaN;
     lastQuote = 0n;
@@ -386,7 +406,7 @@ async function main(): Promise<void> {
       const nextChangeMs = (selected.start + MARKET_SECONDS) * 1000 - Date.now() + 100;
       rotation = setTimeout(() => { void selectAutomaticMarket(false); }, Math.max(100, nextChangeMs));
       report('MARKET SELECTED', undefined, { mode: 'AUTO', outcome: marketOutcome,
-        tokenId: selected.assets[marketOutcome], market: selected.slug,
+        tokenId: selected.assets[marketOutcome], minOrderSize, market: selected.slug,
         endsAt: new Date((selected.start + MARKET_SECONDS) * 1000).toISOString() });
     } catch (error) {
       maintenance = false;
@@ -408,7 +428,7 @@ async function main(): Promise<void> {
     const prepared = await prepareToken(configuredTokenId);
     finishPreparation([configuredTokenId], configuredTokenId,
       [{ assetId: configuredTokenId, ...prepared }]);
-    report('MARKET SELECTED', undefined, { mode: 'MANUAL', tokenId: configuredTokenId });
+    report('MARKET SELECTED', undefined, { mode: 'MANUAL', tokenId: configuredTokenId, minOrderSize });
   }
 
   function requestOutcomeToggle(): void {
@@ -423,13 +443,15 @@ async function main(): Promise<void> {
     }
     const nextTokenId = marketAssets[marketOutcome];
     const nextTick = nextTokenId ? tokenTicks.get(nextTokenId) : undefined;
-    if (!nextTokenId || nextTick === undefined) {
+    const nextMinOrderSize = nextTokenId ? tokenMinOrderSizes.get(nextTokenId) : undefined;
+    if (!nextTokenId || nextTick === undefined || nextMinOrderSize === undefined) {
       report('OUTCOME SWITCH FAILED', undefined, { reason: 'Token is not prepared' });
       return;
     }
     armed = false;
     tokenId = nextTokenId;
     tick = nextTick;
+    minOrderSize = nextMinOrderSize;
     activeSelection++;
     const quote = quotes.get(nextTokenId);
     bestBid = quote?.bid ?? NaN;
@@ -462,6 +484,7 @@ async function main(): Promise<void> {
     const connection = socket;
     let price: number | undefined;
     let quotePrice: number | undefined;
+    let estimatedSharesAtQuote: number | undefined;
     let ownsLock = false;
     try {
       if (busy) throw fault('Another order is in flight');
@@ -472,6 +495,10 @@ async function main(): Promise<void> {
       }
       quotePrice = side === OrderSide.BUY ? bestAsk : bestBid;
       if (!Number.isFinite(quotePrice) || quotePrice <= 0 || quotePrice >= 1) throw fault('Requested book side is empty');
+      estimatedSharesAtQuote = orderSizeUnit === 'SHARES' ? orderSize : orderSize / quotePrice;
+      if (estimatedSharesAtQuote + 1e-9 < minOrderSize) {
+        throw fault(`Order is about ${estimatedSharesAtQuote.toFixed(4)} shares; market minimum is ${minOrderSize} shares`);
+      }
       if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > bestAsk) throw fault('Crossed quote');
       const selection = activeSelection;
       const assetId = tokenId;
@@ -513,6 +540,7 @@ async function main(): Promise<void> {
           recordSell(assetId, submittedAmount);
         }
         report(`DRY RUN ${side}`, trace, { tokenId: assetId, quotePrice, limitPrice: price,
+          estimatedSharesAtQuote, minOrderSize,
           orderType: 'FAK',
           configuredSize: orderSize, configuredUnit: orderSizeUnit,
           submittedAmount, submittedUnit,
@@ -528,7 +556,7 @@ async function main(): Promise<void> {
       trace.post = now();
       const pending = client.postOrder(order);
       report(`${trace.source} ${side}`, { ...trace }, { tokenId: assetId,
-        quotePrice, limitPrice: price, orderType: 'FAK',
+        quotePrice, limitPrice: price, estimatedSharesAtQuote, minOrderSize, orderType: 'FAK',
         configuredSize: orderSize, configuredUnit: orderSizeUnit,
         submittedAmount, submittedUnit });
       const response = await pending;
@@ -549,13 +577,15 @@ async function main(): Promise<void> {
       }
       report(response.ok ? 'ORDER SUCCESS' : 'ORDER FAILED', trace,
         response.ok ? { side, tokenId: assetId, quotePrice, limitPrice: price,
-          averageFillPrice, orderId: response.orderId, status: response.status,
+          estimatedSharesAtQuote, minOrderSize, averageFillPrice,
+          orderId: response.orderId, status: response.status,
           makingAmount: response.makingAmount, takingAmount: response.takingAmount }
           : { side, tokenId: assetId, quotePrice, limitPrice: price, code: response.code });
     } catch (error) {
       if (trace.post !== undefined && trace.response === undefined) trace.response = now();
       // Never print SDK errors wholesale: they can contain requests/auth headers.
       report('ORDER FAILED', trace, { side, tokenId, quotePrice, limitPrice: price,
+        estimatedSharesAtQuote, minOrderSize,
         reason: error instanceof Error && error.name === 'ExecutorError' ? error.message : 'SDK request/signing failed',
         outcome: trace.post === undefined ? 'not submitted' : 'check exchange; no automatic retry' });
     } finally {
@@ -722,7 +752,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
   report('READY', undefined, { live, tick, account: 'EOA', keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN',
-    orderSize, orderSizeUnit, autoFindMarket, marketOutcome,
+    orderSize, orderSizeUnit, minOrderSize, autoFindMarket, marketOutcome,
     autoSellProfitPercent, buySlippageEnabled, sellSlippageEnabled });
 }
 

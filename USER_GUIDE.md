@@ -35,7 +35,7 @@ PRIVATE_KEY=0x你的私钥
 # 市场在启动菜单选择
 
 # ===== 每次订单大小 =====
-ORDER_SIZE=1
+ORDER_SIZE=5
 ORDER_SIZE_UNIT=USD
 
 # ===== 自动卖出 =====
@@ -85,24 +85,26 @@ MARKET_OUTCOME=UP
 ### 每次交易多少
 
 ```ini
-ORDER_SIZE=1
+ORDER_SIZE=5
 ORDER_SIZE_UNIT=USD
 ```
 
-`ORDER_SIZE_UNIT=USD` 时，`ORDER_SIZE=1` 表示每按一次，目标交易金额约为 1 美元。
+`ORDER_SIZE_UNIT=USD` 时，`ORDER_SIZE=5` 表示每按一次，目标交易金额约为 5 美元。
 
-- 按一次 `b`：买约 1 美元。
-- 按一次 `s`：卖出当时价值约 1 美元的份额。
+- 按一次 `b`：买约 5 美元。
+- 按一次 `s`：卖出当时价值约 5 美元的份额。
 - 按三次：会分别尝试提交三笔订单。
+
+Polymarket 每个市场都有最小订单份额，BTC 五分钟市场当前通常是 5 份。程序启动时会自动读取这个数字。例如当前价格是 0.59，1 美元只能换算成约 1.6949 份，少于 5 份，程序会直接拒绝，不会偷偷增加金额。
 
 如果希望每次固定交易份额，可以改成：
 
 ```ini
-ORDER_SIZE=2
+ORDER_SIZE=5
 ORDER_SIZE_UNIT=SHARES
 ```
 
-这表示每次目标买入或卖出 2 份。实际成交金额可能因为价格变化、部分成交和手续费而略有不同。
+这表示每次目标买入或卖出 5 份。实际成交金额可能因为价格变化、部分成交和手续费而略有不同。
 
 ### 自动卖出
 
@@ -223,7 +225,7 @@ UP 和 DOWN 是两个不同 Token。填错 `TOKEN_ID` 会直接交易错误方�
 ## 7. 建议的第一次配置
 
 ```ini
-ORDER_SIZE=1
+ORDER_SIZE=5
 ORDER_SIZE_UNIT=USD
 AUTO_SELL_PROFIT_PERCENT=20
 
