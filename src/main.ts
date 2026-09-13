@@ -117,6 +117,9 @@ type Trace = {
   response?: bigint;
 };
 
+type MarketOutcome = 'UP' | 'DOWN';
+type Quote = { bid: number; ask: number; received: bigint };
+
 // Formatting and console I/O happen on a later turn, never before order dispatch.
 function report(event: string, trace?: Trace, detail?: object): void {
   setImmediate(() => {
@@ -167,10 +170,11 @@ async function main(): Promise<void> {
   process.stdin.resume();
   const marketChoice = await chooseOption('选择市场', ['Bitcoin 五分钟', '其他市场']);
   const autoFindMarket = marketChoice === 0;
-  let marketOutcome = (process.env.MARKET_OUTCOME ?? 'UP').trim().toUpperCase();
-  if (marketOutcome !== 'UP' && marketOutcome !== 'DOWN') {
+  const configuredOutcome = (process.env.MARKET_OUTCOME ?? 'UP').trim().toUpperCase();
+  if (configuredOutcome !== 'UP' && configuredOutcome !== 'DOWN') {
     throw fault('Invalid MARKET_OUTCOME; use UP or DOWN');
   }
+  let marketOutcome = configuredOutcome as MarketOutcome;
   let configuredTokenId = '';
   if (!autoFindMarket) {
     configuredTokenId = await askTokenId();
@@ -201,6 +205,11 @@ async function main(): Promise<void> {
   credentialsReady = true;
 
   let tokenId = configuredTokenId;
+  let subscribedTokenIds = configuredTokenId ? [configuredTokenId] : [];
+  let marketAssets: Partial<Record<MarketOutcome, string>> = {};
+  const tokenTicks = new Map<string, number>();
+  const quotes = new Map<string, Quote>();
+  let activeSelection = 0;
   let tick = NaN;
   let cacheDeadline = 0n;
   let bestBid: number = NaN;
@@ -217,7 +226,6 @@ async function main(): Promise<void> {
   let rotation: NodeJS.Timeout | undefined;
   let lastPong = 0;
   let lastQuote = 0n;
-  let outcomeToggleQueued = false;
 
   async function prepareToken(assetId: string): Promise<{ tick: number; deadline: bigint }> {
     const preparedTick = await fetchTickSize(client, { assetId });
@@ -240,7 +248,9 @@ async function main(): Promise<void> {
     return Array.isArray(value) && value.every(item => typeof item === 'string') ? value : [];
   }
 
-  async function discoverCurrentMarket(): Promise<{ assetId: string; slug: string; start: number }> {
+  async function discoverCurrentMarket(): Promise<{
+    assets: Record<MarketOutcome, string>; slug: string; start: number;
+  }> {
     const start = Math.floor(Date.now() / 1000 / MARKET_SECONDS) * MARKET_SECONDS;
     const slug = `btc-updown-5m-${start}`;
     const response = await nativeFetch(`${GAMMA_URL}${slug}`);
@@ -252,12 +262,14 @@ async function main(): Promise<void> {
     }
     const outcomes = readStringArray(market.outcomes);
     const assetIds = readStringArray(market.clobTokenIds);
-    const outcomeIndex = outcomes.findIndex(item => item.toUpperCase() === marketOutcome);
-    const assetId = assetIds[outcomeIndex];
-    if (outcomeIndex < 0 || !assetId || !validTokenId(assetId)) {
-      throw fault(`No ${marketOutcome} token in current market`);
+    const upIndex = outcomes.findIndex(item => item.toUpperCase() === 'UP');
+    const downIndex = outcomes.findIndex(item => item.toUpperCase() === 'DOWN');
+    const up = assetIds[upIndex];
+    const down = assetIds[downIndex];
+    if (upIndex < 0 || downIndex < 0 || !up || !down || !validTokenId(up) || !validTokenId(down)) {
+      throw fault('Current market does not contain valid UP and DOWN tokens');
     }
-    return { assetId, slug, start };
+    return { assets: { UP: up, DOWN: down }, slug, start };
   }
 
   function retireConnection(): void {
@@ -267,10 +279,22 @@ async function main(): Promise<void> {
     if (socket && socket.readyState !== WebSocket.CLOSED) socket.terminate();
   }
 
-  function finishPreparation(assetId: string, prepared: { tick: number; deadline: bigint }): void {
-    tokenId = assetId;
-    tick = prepared.tick;
-    cacheDeadline = prepared.deadline;
+  function finishPreparation(
+    assetIds: string[],
+    activeAssetId: string,
+    preparedTokens: Array<{ assetId: string; tick: number; deadline: bigint }>,
+  ): void {
+    subscribedTokenIds = assetIds;
+    tokenTicks.clear();
+    cacheDeadline = preparedTokens[0]?.deadline ?? 0n;
+    for (const prepared of preparedTokens) {
+      tokenTicks.set(prepared.assetId, prepared.tick);
+      if (prepared.deadline < cacheDeadline) cacheDeadline = prepared.deadline;
+    }
+    quotes.clear();
+    tokenId = activeAssetId;
+    tick = tokenTicks.get(activeAssetId) ?? NaN;
+    activeSelection++;
     bestBid = bestAsk = NaN;
     lastQuote = 0n;
     blocked = undefined;
@@ -293,17 +317,25 @@ async function main(): Promise<void> {
     maintenance = true;
     try {
       const selected = await discoverCurrentMarket();
-      const prepared = await prepareToken(selected.assetId);
+      const preparedUp = await prepareToken(selected.assets.UP);
+      const preparedDown = await prepareToken(selected.assets.DOWN);
       if (Math.floor(Date.now() / 1000) >= selected.start + MARKET_SECONDS) {
         throw fault('Market changed during preparation');
       }
       if (stopped) return;
-      finishPreparation(selected.assetId, prepared);
+      marketAssets = selected.assets;
+      finishPreparation(
+        [selected.assets.UP, selected.assets.DOWN],
+        selected.assets[marketOutcome],
+        [
+          { assetId: selected.assets.UP, ...preparedUp },
+          { assetId: selected.assets.DOWN, ...preparedDown },
+        ],
+      );
       const nextChangeMs = (selected.start + MARKET_SECONDS) * 1000 - Date.now() + 100;
       rotation = setTimeout(() => { void selectAutomaticMarket(false); }, Math.max(100, nextChangeMs));
       report('MARKET SELECTED', undefined, { mode: 'AUTO', outcome: marketOutcome,
         market: selected.slug, endsAt: new Date((selected.start + MARKET_SECONDS) * 1000).toISOString() });
-      if (outcomeToggleQueued) setImmediate(() => { void applyOutcomeToggle(); });
     } catch (error) {
       maintenance = false;
       const reason = error instanceof Error && error.name === 'ExecutorError'
@@ -322,7 +354,8 @@ async function main(): Promise<void> {
   async function selectConfiguredMarket(): Promise<void> {
     maintenance = true;
     const prepared = await prepareToken(configuredTokenId);
-    finishPreparation(configuredTokenId, prepared);
+    finishPreparation([configuredTokenId], configuredTokenId,
+      [{ assetId: configuredTokenId, ...prepared }]);
     report('MARKET SELECTED', undefined, { mode: 'MANUAL' });
   }
 
@@ -331,25 +364,26 @@ async function main(): Promise<void> {
       report('TAB SWITCH UNAVAILABLE', undefined, { reason: 'Only available for Bitcoin five-minute market' });
       return;
     }
-    outcomeToggleQueued = !outcomeToggleQueued;
-    if (!outcomeToggleQueued) {
-      report('OUTCOME SWITCH CANCELLED');
-      return;
-    }
-    if (busy || blocked === 'Changing BTC 5-minute market') {
-      report('OUTCOME SWITCH QUEUED');
-      return;
-    }
-    setImmediate(() => { void applyOutcomeToggle(); });
-  }
-
-  async function applyOutcomeToggle(): Promise<void> {
-    if (!outcomeToggleQueued || busy || blocked === 'Changing BTC 5-minute market') return;
-    outcomeToggleQueued = false;
     marketOutcome = marketOutcome === 'UP' ? 'DOWN' : 'UP';
-    clearTimeout(rotation);
-    report('SWITCHING OUTCOME', undefined, { outcome: marketOutcome });
-    await selectAutomaticMarket(false);
+    if (blocked === 'Changing BTC 5-minute market') {
+      report('OUTCOME SWITCH QUEUED', undefined, { outcome: marketOutcome });
+      return;
+    }
+    const nextTokenId = marketAssets[marketOutcome];
+    const nextTick = nextTokenId ? tokenTicks.get(nextTokenId) : undefined;
+    if (!nextTokenId || nextTick === undefined) {
+      report('OUTCOME SWITCH FAILED', undefined, { reason: 'Token is not prepared' });
+      return;
+    }
+    armed = false;
+    tokenId = nextTokenId;
+    tick = nextTick;
+    activeSelection++;
+    const quote = quotes.get(nextTokenId);
+    bestBid = quote?.bid ?? NaN;
+    bestAsk = quote?.ask ?? NaN;
+    lastQuote = quote?.received ?? 0n;
+    report('OUTCOME SWITCHED', undefined, { outcome: marketOutcome });
   }
 
   function invalidate(reason: string): void {
@@ -386,6 +420,9 @@ async function main(): Promise<void> {
       const quote = side === OrderSide.BUY ? bestAsk : bestBid;
       if (!Number.isFinite(quote) || quote <= 0 || quote >= 1) throw fault('Requested book side is empty');
       if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > bestAsk) throw fault('Crossed quote');
+      const selection = activeSelection;
+      const assetId = tokenId;
+      const bidAtInvoke = bestBid;
       busy = true;
       ownsLock = true;
       price = priceFor(side);
@@ -397,18 +434,19 @@ async function main(): Promise<void> {
         // the requested share count into the maximum signed USD amount.
         submittedAmount = orderSizeUnit === 'USD' ? orderSize : orderSize * price;
         submittedUnit = 'USD';
-        order = await client.createMarketOrder({ assetId: tokenId, side,
+        order = await client.createMarketOrder({ assetId, side,
           amount: submittedAmount, maxPrice: price, orderType: OrderType.FAK });
       } else {
         // The SDK's FAK SELL input is shares. USD mode sizes those shares from
         // the current best bid; actual proceeds depend on partial fills/prices.
-        submittedAmount = orderSizeUnit === 'SHARES' ? orderSize : orderSize / bestBid;
+        submittedAmount = orderSizeUnit === 'SHARES' ? orderSize : orderSize / bidAtInvoke;
         submittedUnit = 'SHARES';
-        order = await client.createMarketOrder({ assetId: tokenId, side,
+        order = await client.createMarketOrder({ assetId, side,
           shares: submittedAmount, minPrice: price, orderType: OrderType.FAK });
       }
       // A disconnect or tick change during the async signer must prevent posting.
       if (stopped || blocked || socket !== connection || socket.readyState !== WebSocket.OPEN || now() >= cacheDeadline
+        || activeSelection !== selection || tokenId !== assetId
         || !lastQuote || now() - lastQuote > 5_000_000_000n) {
         throw fault('Trading state changed during signing');
       }
@@ -447,7 +485,6 @@ async function main(): Promise<void> {
     } finally {
       // A rejected overlapping keypress must not release the active order's lock.
       if (ownsLock) busy = false;
-      if (!busy && outcomeToggleQueued) setImmediate(() => { void applyOutcomeToggle(); });
     }
   }
 
@@ -458,50 +495,64 @@ async function main(): Promise<void> {
     return Number.isFinite(value) && value > 0 && value < 1 ? value : NaN;
   }
 
-  // Only the documented fields are read; no runtime schema library or depth map.
-  function update(message: any): boolean {
+  function storeQuote(assetId: string, bid: number, ask: number, received: bigint): boolean {
+    quotes.set(assetId, { bid, ask, received });
+    if (assetId !== tokenId) return false;
+    bestBid = bid;
+    bestAsk = ask;
+    lastQuote = received;
+    return true;
+  }
+
+  // Both BTC outcomes stay hot in memory; no network work is needed on Tab.
+  function update(message: any, received: bigint): boolean {
     if (!message || typeof message !== 'object') return false;
     if (message.event_type === 'price_change') {
       if (!Array.isArray(message.price_changes)) return false;
-      let changed = false;
+      let activeChanged = false;
       for (const change of message.price_changes) {
-        if (change?.asset_id !== tokenId) continue;
-        bestBid = quoteNumber(change.best_bid);
-        bestAsk = quoteNumber(change.best_ask);
-        changed = true;
+        const assetId = change?.asset_id;
+        if (typeof assetId !== 'string' || !subscribedTokenIds.includes(assetId)) continue;
+        if (storeQuote(assetId, quoteNumber(change.best_bid), quoteNumber(change.best_ask), received)) {
+          activeChanged = true;
+        }
       }
-      return changed;
+      return activeChanged;
     }
-    if (message.asset_id !== tokenId) {
-      if (message.event_type === 'market_resolved' && message.assets_ids?.includes(tokenId)) invalidate('Market resolved');
+    if (message.event_type === 'market_resolved'
+      && subscribedTokenIds.some(assetId => message.assets_ids?.includes(assetId))) {
+      invalidate('Market resolved');
+      return false;
+    }
+    const assetId = message.asset_id;
+    if (typeof assetId !== 'string' || !subscribedTokenIds.includes(assetId)) {
       return false;
     }
     if (message.event_type === 'best_bid_ask') {
-      bestBid = quoteNumber(message.best_bid);
-      bestAsk = quoteNumber(message.best_ask);
-      return true;
+      return storeQuote(assetId, quoteNumber(message.best_bid), quoteNumber(message.best_ask), received);
     }
-    if (message.event_type === 'tick_size_change' && Number(message.new_tick_size) !== tick) {
+    if (message.event_type === 'tick_size_change'
+      && Number(message.new_tick_size) !== tokenTicks.get(assetId)) {
       invalidate('Tick size changed; restart to refresh SDK metadata');
     }
     if (message.event_type === 'book' && Array.isArray(message.bids) && Array.isArray(message.asks)) {
-      bestBid = bestAsk = NaN;
+      let bid = NaN;
+      let ask = NaN;
       for (const level of message.bids) {
         const price = quoteNumber(level.price);
-        if (Number(level.size) > 0 && Number.isFinite(price) && (!Number.isFinite(bestBid) || price > bestBid)) bestBid = price;
+        if (Number(level.size) > 0 && Number.isFinite(price) && (!Number.isFinite(bid) || price > bid)) bid = price;
       }
       for (const level of message.asks) {
         const price = quoteNumber(level.price);
-        if (Number(level.size) > 0 && Number.isFinite(price) && (!Number.isFinite(bestAsk) || price < bestAsk)) bestAsk = price;
+        if (Number(level.size) > 0 && Number.isFinite(price) && (!Number.isFinite(ask) || price < ask)) ask = price;
       }
-      return true;
+      return storeQuote(assetId, bid, ask, received);
     }
     return false;
   }
 
   function handle(item: any, received: bigint, parsed: bigint): void {
-    if (!update(item)) return;
-    lastQuote = received;
+    if (!update(item, received)) return;
     const fire = armed && !busy && !blocked && bestBid >= trigger;
     const judged = now();
     if (fire) {
@@ -511,6 +562,7 @@ async function main(): Promise<void> {
   }
 
   function connect(): void {
+    quotes.clear();
     bestBid = bestAsk = NaN;
     lastQuote = 0n;
     const generation = ++connectionGeneration;
@@ -518,7 +570,7 @@ async function main(): Promise<void> {
     socket = ws;
     let pingTimer: NodeJS.Timeout | undefined;
     ws.on('open', () => {
-      ws.send(JSON.stringify({ assets_ids: [tokenId], type: 'market', custom_feature_enabled: true }));
+      ws.send(JSON.stringify({ assets_ids: subscribedTokenIds, type: 'market', custom_feature_enabled: true }));
       lastPong = Date.now();
       pingTimer = setInterval(() => {
         if (Date.now() - lastPong > 30_000) { ws.terminate(); return; }
@@ -542,6 +594,7 @@ async function main(): Promise<void> {
       clearInterval(pingTimer);
       if (heartbeat === pingTimer) heartbeat = undefined;
       if (generation !== connectionGeneration || stopped) return;
+      quotes.clear();
       bestBid = bestAsk = NaN;
       lastQuote = 0n;
       armed = false;

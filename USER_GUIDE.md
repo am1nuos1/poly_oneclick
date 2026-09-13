@@ -170,7 +170,7 @@ SELL_SLIPPAGE=0
 
 程序一次只处理一笔订单。上一笔还没完成时继续按键，新的订单不会排队。
 
-选择 Bitcoin 五分钟后，可以随时按 `Tab` 切换方向。程序会显示 `SWITCHING OUTCOME`，随后显示新的 `MARKET SELECTED` 和 `WS CONNECTED`。切换会关闭当前自动卖出 armed 状态；需要自动卖出时再按一次 `a`。
+选择 Bitcoin 五分钟后，可以随时按 `Tab` 切换方向。程序会立即显示 `OUTCOME SWITCHED`，不需要重新连接。切换会关闭当前自动卖出 armed 状态；需要自动卖出时再按一次 `a`。
 
 选择“其他市场”时，程序只有你输入的一个 Token ID，因此 `Tab` 不切换品种。
 

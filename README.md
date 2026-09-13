@@ -72,7 +72,7 @@ SELL：内存 `bestBid - SELL_SLIPPAGE` → tick 对齐 / clamp → `minPrice` +
 
 `BUY_SLIPPAGE_ENABLED=true` 时 BUY 使用 `bestAsk + BUY_SLIPPAGE`；`SELL_SLIPPAGE_ENABLED=true` 时 SELL 使用 `bestBid - SELL_SLIPPAGE`。价格 clamp 至 `[tick, 1-tick]`，tick 对齐朝原报价方向取整，不额外扩大 slippage。某一侧设为 `false` 时只忽略该侧的 slippage 数值：BUY 显式使用最高合法价 `1-tick`，SELL 显式使用最低合法价 `tick`，因此该侧有可用流动性就立即成交；这可能接受非常差的成交价。不调用未显式传价格的 SDK market-order 路径。FAK 可部分成交或零成交；成功响应不等于全部成交。
 
-官方 Market WebSocket：`wss://ws-subscriptions-clob.polymarket.com/ws/market`。订阅 `{ assets_ids: [TOKEN_ID], type: "market", custom_feature_enabled: true }`，关闭 per-message deflate。处理 `best_bid_ask`、`price_change`，初始 `book` 仅扫描最高买价/最低卖价，不保存 depth。10 秒 PING，30 秒未收到 PONG 则断开，1 秒后重连。断线清空报价并 disarm；报价超过 5 秒未更新时拒单。
+官方 Market WebSocket：`wss://ws-subscriptions-clob.polymarket.com/ws/market`。Bitcoin 五分钟模式同时订阅 UP 和 DOWN；按 `Tab` 只切换内存中的当前 Token，不重新查询市场或连接 WebSocket。处理 `best_bid_ask`、`price_change`，初始 `book` 仅扫描最高买价/最低卖价，不保存 depth。10 秒 PING，30 秒未收到 PONG 则断开，1 秒后重连。断线清空报价并 disarm；报价超过 5 秒未更新时拒单。
 
 ## 延迟
 
