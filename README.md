@@ -6,7 +6,7 @@ Node.js 24+。启动时用上下键选择 Bitcoin 五分钟或其他市场，无
 
 ## 最简单的启动方法
 
-运行界面使用简洁的固定面板，显示模式、行情连接状态、当前场次（UTC）、UP/DOWN 和自动卖出状态。下方保留最近五条提示及最近一次延迟，不再展示长 Token ID。转场明确提示“切换成功”或“切换失败”；切换成功后的行情连接状态单独显示。
+运行界面使用固定面板。盘口、持仓、订单设置和状态原地更新；内存中保留最近 10 条重要事件，较矮的终端会显示其中最新几条。两秒内连续出现的相同事件会合并计数。普通模式只显示三项最近延迟，Token ID 使用缩写。转场明确提示“切换成功”或“切换失败”；切换成功后的行情连接状态单独显示。
 
 全部配置都在纯文本文件 `config.txt` 中。先用记事本编辑并保存它，然后双击 [start.cmd](./start.cmd) 启动。`start.cmd` 只读取配置并启动程序，不会创建、打开或修改配置文件。以后修改配置时仍直接编辑 `config.txt`，修改后需重启程序。
 
@@ -33,6 +33,7 @@ SELL_SLIPPAGE=0
 
 # ===== 运行模式 =====
 LIVE_TRADING=false
+DEBUG_UI=false
 ```
 
 完整无密钥模板是 `config.example.txt`。实际 `config.txt` 只保存在本机，并已被 `.gitignore` 排除；不要提交、分享或复制其中的私钥。建议先保持 `LIVE_TRADING=false` 测试。
@@ -59,6 +60,7 @@ npm run build
 | SELL_SLIPPAGE_ENABLED | SELL 是否使用滑点限制；`false` 时有买单就立即尝试卖出 |
 | BUY_SLIPPAGE / SELL_SLIPPAGE | 绝对价格增减，例如 0.01 = 1¢，默认 0 |
 | LIVE_TRADING | 默认 false；只接受 true / false |
+| DEBUG_UI | 默认 false；true 显示完整 Token、market slug 和完整延迟分解 |
 
 `b` BUY，`s` SELL，`a` armed/disarmed，`Tab` 在 Bitcoin 五分钟的 UP/DOWN 间切换，`←` 返回上一期，`→` 前往下一期，Ctrl+C 退出。终端会在“当前市场”和“当前品种”行显示本期场次（UTC 起止时间）。每按一次 `b` 或 `s` 只提交一笔 `ORDER_SIZE`，按几次就提交几次。自动卖出使用本次运行中由程序买入的加权平均成本；例如平均买入价 0.50、`AUTO_SELL_PROFIT_PERCENT=20`，目标价就是 0.60。当 `bestBid` 达到目标时触发一次并立即 disarm；它也使用同一个 `ORDER_SIZE`。按 `a` 时若当前 Token 尚无本次买入记录，程序会显示 `ARM FAILED`。切换 UP/DOWN 会 disarm，并为两个 Token 分别保留本期内的买入成本；进入下一期市场后重新计算。
 
@@ -82,7 +84,7 @@ SELL：内存 `bestBid - SELL_SLIPPAGE` → tick 对齐 / clamp → `minPrice` +
 
 ## 延迟
 
-`process.hrtime.bigint()` 记录 WS callback、JSON parse、trigger 判断、execute 调用、postOrder 调用和返回时间，输出原始 ns 时间戳与 us/ms 间隔：
+`process.hrtime.bigint()` 记录 WS callback、JSON parse、trigger 判断、execute 调用、postOrder 调用和返回时间。普通界面只显示 Input/WS → Post、Post → Response 和 Total；`DEBUG_UI=true` 时显示完整分解：
 
 - `ws_to_parse`
 - `parse_to_trigger`（包含报价更新）
@@ -93,7 +95,7 @@ SELL：内存 `bestBid - SELL_SLIPPAGE` → tick 对齐 / clamp → `minPrice` +
 
 手动订单用键盘 callback 作为 input 起点，WS 相关指标为 null，避免把用户思考时间算作行情延迟。Dry run 用 `dry_dispatch_ns`、`dry_*_to_dispatch_us/ms` 记录签名后的模拟发送边界，真实 post/response 指标为 null。`postOrder` 调用时间不是 socket 实际写出时间。
 
-普通行情不打印。订单日志中的 `quotePrice` 是按键或触发时的当前 `bestAsk`/`bestBid`，`limitPrice` 是订单允许的最差价格。订单/触发日志通过 `setImmediate` 延后格式化输出，不在发送前同步写日志；连接、armed 状态与停止交易原因只在状态变化时输出。
+普通行情只更新内存面板状态，不加入事件历史。订单日志中的 `quotePrice` 是按键或触发时的当前 `bestAsk`/`bestBid`，`limitPrice` 是订单允许的最差价格。订单/触发日志通过 `setImmediate` 延后格式化；界面以 dirty 标记和 100ms 定时器限制为最高约 10 FPS。签名到 `postOrder` 调用完成之前会暂停终端渲染。
 
 ## SDK 边界与限制
 

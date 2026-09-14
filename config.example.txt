@@ -19,3 +19,5 @@ SELL_SLIPPAGE=0
 
 # ===== 运行模式 =====
 LIVE_TRADING=false
+# true 显示完整 Token、market slug 和全部延迟阶段
+DEBUG_UI=false
