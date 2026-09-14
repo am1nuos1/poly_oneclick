@@ -129,6 +129,44 @@ type MarketOutcome = 'UP' | 'DOWN';
 type Quote = { bid: number; ask: number; received: bigint };
 type CostBasis = { shares: number; cost: number };
 
+const panel = { mode: '准备中', market: '—', session: '—', outcome: '—',
+  ws: '连接中', armed: false, start: 0, latency: '', events: [] as string[] };
+
+function sessionStatus(): string {
+  if (!panel.start) return '';
+  const current = Math.floor(Date.now() / 1000 / MARKET_SECONDS) * MARKET_SECONDS;
+  return panel.start === current ? '【当期】' : panel.start < current ? '【已结束】'
+    : panel.start === current + MARKET_SECONDS ? '【下一期】' : '【未来场次】';
+}
+
+function renderPanel(): void {
+  const width = Math.max(20, Math.min(68, (process.stdout.columns || 80) - 2));
+  const fit = (text: string): string => {
+    let result = '', used = 0;
+    for (const char of text.replace(/[\x00-\x1f\x7f]/g, ' ')) {
+      const size = /[\u2e80-\uffff]/u.test(char) ? 2 : 1;
+      if (used + size > width - 2) break;
+      result += char;
+      used += size;
+    }
+    return `│ ${result}${' '.repeat(width - used - 1)}│`;
+  };
+  const lines = [
+    `┌${'─'.repeat(width)}┐`, fit('POLY ONECLICK'),
+    fit(`${panel.mode}  |  行情：${panel.ws}`),
+    fit(`市场：${panel.market}  |  ${panel.outcome}`),
+    fit(`场次：${panel.session} ${sessionStatus()}`),
+    fit(`自动卖出：${panel.armed ? '已开启' : '关闭'}`),
+    `└${'─'.repeat(width)}┘`,
+    '  B 买入   S 卖出   A 自动卖出',
+    '  Tab 切UP/DOWN   ← 上一期   → 下一期',
+    '  Ctrl+C 退出', '', '最近提示', '─'.repeat(width),
+    ...panel.events.slice(-Math.max(1, Math.min(5, (process.stdout.rows || 24) - 15))),
+    ...(panel.latency ? ['', `最近延迟：${panel.latency}`] : []),
+  ];
+  process.stdout.write(`\x1b[H\x1b[0J${lines.join('\n')}\n`);
+}
+
 // Formatting and console I/O happen on a later turn, never before order dispatch.
 function report(event: string, trace?: Trace, detail?: object): void {
   setImmediate(() => {
@@ -159,29 +197,44 @@ function report(event: string, trace?: Trace, detail?: object): void {
       ['按键→发送', interval(trace.input, trace.post)],
     ].filter((item): item is [string, string] => item[1] !== undefined)
       .map(([name, duration]) => `${name} ${duration}`).join('，') : '';
-    const withLatency = (line: string): string => latency ? `${line} | ${latency}` : line;
+    if (latency) panel.latency = latency;
+    const withLatency = (line: string): string => line;
     let line: string;
 
     if (event === 'READY') {
-      const session = value('session');
-      line = `准备完成｜${data.live ? '真实交易' : '模拟模式'}｜场次 ${session}｜B买 S卖 A自动卖 Tab切UP/DOWN ←上一期 →下一期`;
+      panel.mode = data.live ? '真实交易' : '模拟模式';
+      line = '准备完成';
     } else if (event === 'WS CONNECTED') {
+      panel.ws = '已连接';
       line = '行情已连接';
     } else if (event === 'WS DISCONNECTED') {
+      panel.ws = '重连中';
+      panel.armed = false;
       line = '行情已断开，正在重连；自动卖出已关闭';
     } else if (event === 'MARKET SELECTED' || event === 'MARKET SWITCHED') {
-      line = `当前市场｜场次 ${value('session')}｜${value('market')}｜${value('outcome')}｜Token ${value('tokenId')}`;
+      panel.market = data.mode === 'AUTO' ? 'BTC 5M' : '其他市场';
+      panel.session = value('session');
+      panel.start = Number(data.sessionStart) || 0;
+      panel.outcome = value('outcome');
+      panel.ws = '连接中';
+      panel.armed = false;
+      line = `${event === 'MARKET SWITCHED' ? '切换成功' : '市场已选择'} → ${panel.session} ${sessionStatus()} ${panel.outcome}（行情连接中）`;
     } else if (event === 'MARKET SWITCHING') {
-      line = `${data.direction === 'NEXT' ? '正在前往下一期' : '正在返回上一期'}｜${value('targetMarket')}`;
+      panel.armed = false;
+      line = `${data.direction === 'NEXT' ? '正在前往下一期' : '正在返回上一期'}…`;
     } else if (event === 'MARKET SWITCH FAILED') {
-      line = `${data.direction === 'NEXT' ? '无法前往下一期' : '无法返回上一期'}｜${reasonText(data.reason)}`;
+      line = `切换失败：${data.direction === 'NEXT' ? '无法前往下一期' : '无法返回上一期'}，${reasonText(data.reason)}；仍在 ${panel.session}`;
     } else if (event === 'MARKET SEARCH RETRY') {
       line = `下一期暂未就绪，正在重试｜${reasonText(data.reason)}`;
     } else if (event === 'CURRENT TOKEN') {
-      line = `当前品种｜场次 ${value('session')}｜${value('outcome')}｜买 ${value('bestAsk')} 卖 ${value('bestBid')}｜Token ${value('tokenId')}`;
+      panel.outcome = value('outcome');
+      panel.armed = false;
+      line = `品种切换成功 → ${panel.outcome}`;
     } else if (event === 'ARMED') {
+      panel.armed = true;
       line = `自动卖出已开启｜${value('outcome')}｜目标价 ${value('autoSellTarget')}`;
     } else if (event === 'DISARMED') {
+      panel.armed = false;
       line = '自动卖出已关闭';
     } else if (event === 'ARM FAILED') {
       line = `无法开启自动卖出｜${value('reason')}`;
@@ -190,24 +243,29 @@ function report(event: string, trace?: Trace, detail?: object): void {
     } else if (event === 'OUTCOME SWITCH QUEUED') {
       line = `市场切换完成后将使用 ${value('outcome')}`;
     } else if (event === 'TRADING DISABLED') {
+      panel.armed = false;
       line = `交易已暂停｜${value('reason')}`;
     } else if (event.startsWith('DRY RUN ')) {
       const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
       const dryUs = Number(data.dry_input_to_dispatch_us ?? data.dry_trigger_to_dispatch_us);
       const dryLatency = Number.isFinite(dryUs)
         ? ` | 按键/触发→模拟发送 ${dryUs.toFixed(1)}µs/${(dryUs / 1e3).toFixed(3)}ms` : '';
-      line = `模拟 ${side}｜${value('configuredSize')} ${value('configuredUnit')}｜盘口 ${value('quotePrice')}｜限价 ${value('limitPrice')}｜提交 ${value('submittedAmount')} ${value('submittedUnit')}${dryLatency}`;
+      panel.latency = dryLatency.replace(/^ \| /, '');
+      line = `模拟 ${side}｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`;
     } else if (event === 'MANUAL BUY' || event === 'MANUAL SELL'
       || event === 'AUTO BUY' || event === 'AUTO SELL') {
       line = withLatency(`${event.startsWith('AUTO') ? '自动' : '手动'} ${event.endsWith('BUY') ? 'BUY' : 'SELL'} 已发送｜盘口 ${value('quotePrice')}｜限价 ${value('limitPrice')}｜${value('submittedAmount')} ${value('submittedUnit')}`);
     } else if (event === 'ORDER SUCCESS') {
-      line = withLatency(`成交返回成功｜${value('side')}｜均价 ${value('averageFillPrice')}｜成交编号 ${value('orderId')}`);
+      line = withLatency(`订单返回成功｜${value('side')}｜均价 ${value('averageFillPrice')}`);
     } else if (event === 'ORDER FAILED') {
       line = withLatency(`下单失败｜${value('side')}｜${data.reason ?? data.code ?? 'Polymarket rejected the order'}`);
     } else {
       line = data.reason ? `${event}｜${value('reason')}` : event;
     }
-    console.log(line);
+    if (trace?.source === 'AUTO') panel.armed = false;
+    panel.events.push(`${new Date().toISOString().slice(11, 19)}  ${line}`);
+    if (panel.events.length > 5) panel.events.shift();
+    renderPanel();
   });
 }
 
@@ -291,6 +349,7 @@ async function main(): Promise<void> {
   let heartbeat: NodeJS.Timeout | undefined;
   let expiry: NodeJS.Timeout | undefined;
   let rotation: NodeJS.Timeout | undefined;
+  let switchingMarket = false;
   let lastPong = 0;
   let lastQuote = 0n;
 
@@ -446,7 +505,7 @@ async function main(): Promise<void> {
     direction?: 'PREVIOUS' | 'NEXT',
   ): Promise<void> {
     if (stopped) return;
-    if (blocked === 'Changing BTC 5-minute market') return;
+    if (switchingMarket) return;
     const previousBlocked = blocked;
     armed = false;
     blocked = 'Changing BTC 5-minute market';
@@ -455,10 +514,13 @@ async function main(): Promise<void> {
         blocked = previousBlocked;
         report('MARKET SWITCH FAILED', undefined, { direction, reason: 'An order is currently being submitted' });
       } else {
+        blocked = previousBlocked;
         rotation = setTimeout(() => { void selectAutomaticMarket(false); }, 50);
       }
       return;
     }
+    switchingMarket = true;
+    clearTimeout(rotation);
     maintenance = true;
     try {
       const selected = await discoverMarket(requestedStart);
@@ -487,10 +549,11 @@ async function main(): Promise<void> {
       const nextChangeMs = (selected.start + MARKET_SECONDS) * 1000 - Date.now() + 100;
       clearTimeout(rotation);
       rotation = setTimeout(() => { void selectAutomaticMarket(false); }, Math.max(100, nextChangeMs));
-      report(direction ? 'MARKET SWITCHED' : 'MARKET SELECTED', undefined, { mode: 'AUTO', direction,
+      report(initial ? 'MARKET SELECTED' : 'MARKET SWITCHED', undefined, { mode: 'AUTO', direction,
         outcome: marketOutcome,
         tokenId: selected.assets[marketOutcome], minOrderSize, market: selected.slug,
         session: formatSessionRange(selected.start),
+        sessionStart: selected.start,
         endsAt: new Date((selected.start + MARKET_SECONDS) * 1000).toISOString() });
     } catch (error) {
       maintenance = false;
@@ -498,18 +561,23 @@ async function main(): Promise<void> {
         ? error.message : 'Automatic market search failed';
       if (direction) {
         blocked = previousBlocked;
+        rotation = setTimeout(() => { void selectAutomaticMarket(false); },
+          Math.max(100, (selectedMarketStart + MARKET_SECONDS) * 1000 - Date.now() + 100));
         report('MARKET SWITCH FAILED', undefined, { direction, reason,
           currentMarket: selectedMarketSlug });
         return;
       }
       if (initial && attempt < 4) {
         await new Promise(resolve => setTimeout(resolve, 1_000));
-        return selectAutomaticMarket(true, attempt + 1);
+        switchingMarket = false;
+        return await selectAutomaticMarket(true, attempt + 1);
       }
       if (initial) throw fault(reason);
       blocked = reason;
       report('MARKET SEARCH RETRY', undefined, { reason });
       rotation = setTimeout(() => { void selectAutomaticMarket(false); }, 1_000);
+    } finally {
+      switchingMarket = false;
     }
   }
 
@@ -529,8 +597,6 @@ async function main(): Promise<void> {
       return;
     }
     const targetStart = selectedMarketStart + (direction === 'NEXT' ? MARKET_SECONDS : -MARKET_SECONDS);
-    clearTimeout(rotation);
-    rotation = undefined;
     report('MARKET SWITCHING', undefined, { direction,
       targetMarket: `btc-updown-5m-${targetStart}` });
     void selectAutomaticMarket(false, 0, targetStart, direction);
@@ -827,6 +893,15 @@ async function main(): Promise<void> {
 
   if (autoFindMarket) await selectAutomaticMarket(true);
   else await selectConfiguredMarket();
+  let displayedSessionStatus = sessionStatus();
+  const panelTimer = setInterval(() => {
+    const status = sessionStatus();
+    if (status !== displayedSessionStatus) {
+      displayedSessionStatus = status;
+      renderPanel();
+    }
+  }, 1_000);
+  panelTimer.unref();
   process.stdin.on('keypress', (text, key) => {
     const input = now();
     if (key?.ctrl && key.name === 'c') { stop(); return; }
@@ -856,6 +931,7 @@ async function main(): Promise<void> {
     }
   });
   function stop(): void {
+    clearInterval(panelTimer);
     stopped = true;
     armed = false;
     clearTimeout(expiry);
