@@ -195,6 +195,15 @@ function sessionStatus(): string {
     : uiState.sessionStart === current + MARKET_SECONDS ? '【下一期】' : '【未来场次】';
 }
 
+function sessionIndicator(): { label: string; tone: UiTone } {
+  if (!uiState.sessionStart) return { label: '未知', tone: 'warning' };
+  const current = Math.floor(Date.now() / 1000 / MARKET_SECONDS) * MARKET_SECONDS;
+  if (uiState.sessionStart === current) return { label: '当期进行中', tone: 'success' };
+  if (uiState.sessionStart < current) return { label: '已过期', tone: 'error' };
+  if (uiState.sessionStart === current + MARKET_SECONDS) return { label: '下一期（未开始）', tone: 'warning' };
+  return { label: '未来场次（未开始）', tone: 'warning' };
+}
+
 function numberText(value: number, digits = 4): string {
   if (!Number.isFinite(value)) return '—';
   return value.toFixed(digits).replace(/\.?0+$/, '');
@@ -204,12 +213,16 @@ function shortToken(tokenId: string): string {
   return tokenId.length > 14 ? `${tokenId.slice(0, 7)}...${tokenId.slice(-5)}` : tokenId || '—';
 }
 
-const ANSI = { reset: '\x1b[0m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m' };
+const ANSI = { reset: '\x1b[0m', bold: '\x1b[1m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m' };
 
 function paint(text: string, tone: UiTone): string {
   if (!process.stdout.isTTY || process.env.NO_COLOR !== undefined || tone === 'normal') return text;
   const color = tone === 'success' ? ANSI.green : tone === 'warning' ? ANSI.yellow : ANSI.red;
   return `${color}${text}${ANSI.reset}`;
+}
+
+function emphasize(text: string): string {
+  return process.stdout.isTTY ? `${ANSI.bold}${text}${ANSI.reset}` : text;
 }
 
 function renderPanel(): void {
@@ -229,14 +242,18 @@ function renderPanel(): void {
     return `│ ${clipped.text}${' '.repeat(width - clipped.width - 1)}│`;
   };
   const row = (text: string, tone: UiTone = 'normal'): string => paint(fit(text), tone);
+  const strongRow = (text: string): string => emphasize(fit(text));
   const summaryTone: UiTone = uiState.connection === '已断开' || uiState.connection === '重连中'
     || uiState.mode === '真实交易' ? 'error'
       : uiState.connection === '已连接' ? 'success' : 'warning';
+  const session = sessionIndicator();
   const spread = Number.isFinite(uiState.bestBid) && Number.isFinite(uiState.bestAsk)
     ? uiState.bestAsk - uiState.bestBid : NaN;
+  const buyPrice = Number.isFinite(uiState.bestAsk) ? numberText(uiState.bestAsk) : '暂无报价';
+  const sellPrice = Number.isFinite(uiState.bestBid) ? numberText(uiState.bestBid) : '暂无报价';
   const buySlip = uiState.buySlippageEnabled ? numberText(uiState.buySlippage) : '关闭';
   const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : '关闭';
-  const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 16));
+  const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 21));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
     paint(clip(`${item.at}  ${item.message}${item.count > 1 ? ` ×${item.count}` : ''}`, width).text, item.tone));
   const latency = uiState.latency;
@@ -245,8 +262,14 @@ function renderPanel(): void {
     `┌${'─'.repeat(width)}┐`,
     row(`POLY ONECLICK  |  ${uiState.mode}  |  行情 ${uiState.connection}  |  ${uiState.readiness}`, summaryTone),
     row(`市场：${uiState.market}  |  ${uiState.outcome}  |  Token ${shortToken(uiState.tokenId)}`),
-    row(`场次：${uiState.session} ${sessionStatus()}`),
-    row(`盘口：Best Bid ${numberText(uiState.bestBid)}  Best Ask ${numberText(uiState.bestAsk)}  Spread ${numberText(spread)}`),
+    row(`场次状态：${session.label}`, session.tone),
+    row(`场次时间：${uiState.session}`),
+    `├${'─'.repeat(width)}┤`,
+    strongRow('当前可成交价格'),
+    strongRow(`BUY  买入价    ${buyPrice}    (Best Ask)`),
+    strongRow(`SELL 卖出价    ${sellPrice}    (Best Bid)`),
+    row(`买卖价差：${numberText(spread)}`),
+    `├${'─'.repeat(width)}┤`,
     row(`订单：${numberText(uiState.orderSize)} ${uiState.orderSizeUnit}  |  Tick ${numberText(uiState.tick)}  |  最低 ${numberText(uiState.minOrderSize)} 份`),
     row(`本次持仓：${numberText(uiState.positionShares)} 份 @ ${numberText(uiState.entryPrice)}  |  目标 ${numberText(uiState.autoSellTarget)}`),
     row(`自动卖出：${uiState.armed ? '已开启' : '关闭'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  滑点 买 ${buySlip} / 卖 ${sellSlip}`,
