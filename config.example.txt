@@ -3,12 +3,12 @@ MARKET_OUTCOME=UP
 PRIVATE_KEY=0x_REPLACE_WITH_LOCAL_PRIVATE_KEY
 # 市场在启动菜单选择；选择其他市场时，程序会要求输入 Token ID
 
-# ===== 每次订单大小 =====
-ORDER_SIZE=5
-ORDER_SIZE_UNIT=USD
+# ===== 每次 BUY 花费 =====
+# 每次 SELL 会卖出最近一笔 BUY 实际买到的剩余份额
+ORDER_SIZE=1
 
 # ===== 自动卖出 =====
-# 20 表示按本程序本次平均买入价上涨 20% 时自动卖出
+# 20 表示最近一笔未卖完的 BUY 上涨 20% 时自动卖出该批次
 AUTO_SELL_PROFIT_PERCENT=20
 
 # ===== 成交价格与滑点 =====

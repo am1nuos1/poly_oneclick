@@ -127,7 +127,7 @@ type Trace = {
 
 type MarketOutcome = 'UP' | 'DOWN';
 type Quote = { bid: number; ask: number; received: bigint };
-type CostBasis = { shares: number; cost: number };
+type BuyLot = { shares: number; cost: number };
 type UiTone = 'normal' | 'success' | 'warning' | 'error';
 type UiDuration = { us: number; ms: number };
 type UiLatency = {
@@ -154,10 +154,11 @@ type UiState = {
   armed: boolean;
   entryPrice: number;
   positionShares: number;
+  sellLotShares: number;
+  buyLotCount: number;
   autoSellTarget: number;
   autoSellProfitPercent: number;
   orderSize: number;
-  orderSizeUnit: string;
   buySlippageEnabled: boolean;
   sellSlippageEnabled: boolean;
   buySlippage: number;
@@ -171,7 +172,8 @@ const uiState: UiState = {
   mode: '准备中', connection: '连接中', readiness: '正在准备', market: '—', marketSlug: '',
   session: '—', sessionStart: 0, outcome: '—', tokenId: '', bestBid: NaN, bestAsk: NaN,
   tick: NaN, minOrderSize: NaN, armed: false, entryPrice: NaN, positionShares: 0,
-  autoSellTarget: NaN, autoSellProfitPercent: 0, orderSize: NaN, orderSizeUnit: 'USD',
+  sellLotShares: 0, buyLotCount: 0,
+  autoSellTarget: NaN, autoSellProfitPercent: 0, orderSize: NaN,
   buySlippageEnabled: true, sellSlippageEnabled: true, buySlippage: 0, sellSlippage: 0,
   debug: false,
 };
@@ -270,8 +272,9 @@ function renderPanel(): void {
     strongRow(`SELL 卖出价    ${sellPrice}    (Best Bid)`),
     row(`买卖价差：${numberText(spread)}`),
     `├${'─'.repeat(width)}┤`,
-    row(`订单：${numberText(uiState.orderSize)} ${uiState.orderSizeUnit}  |  Tick ${numberText(uiState.tick)}  |  最低 ${numberText(uiState.minOrderSize)} 份`),
-    row(`本次持仓：${numberText(uiState.positionShares)} 份 @ ${numberText(uiState.entryPrice)}  |  目标 ${numberText(uiState.autoSellTarget)}`),
+    row(`每次 BUY：${numberText(uiState.orderSize)} USD  |  SELL：最近一笔 BUY 的剩余份额`),
+    row(`本次记录：${numberText(uiState.positionShares)} 份（${uiState.buyLotCount} 笔）  |  Tick ${numberText(uiState.tick)}`),
+    row(`下一次 SELL：${numberText(uiState.sellLotShares)} 份 @ 成本 ${numberText(uiState.entryPrice)}  |  目标 ${numberText(uiState.autoSellTarget)}`),
     row(`自动卖出：${uiState.armed ? '已开启' : '关闭'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  滑点 买 ${buySlip} / 卖 ${sellSlip}`,
       uiState.armed ? 'success' : 'normal'),
     `└${'─'.repeat(width)}┘`,
@@ -336,8 +339,7 @@ function report(event: string, trace?: Trace, detail?: object): void {
       if (reason === 'An order is currently being submitted') return '上一笔订单还在提交';
       if (reason === 'Market switch already in progress') return '市场切换进行中';
       if (reason === 'Only available in Bitcoin five-minute mode') return '仅 Bitcoin 五分钟模式可用';
-      const minimum = /^Order is about ([\d.]+) shares; market minimum is ([\d.]+) shares$/.exec(reason);
-      if (minimum) return `约 ${minimum[1]} 份，低于市场最低 ${minimum[2]} 份`;
+      if (reason === 'No unsold BUY lot recorded for current token') return '当前品种没有可卖的 BUY 批次';
       return reason || '未知原因';
     };
     const dryDispatchUs = Number(data.dry_input_to_dispatch_us ?? data.dry_ws_to_dispatch_us
@@ -389,6 +391,8 @@ function report(event: string, trace?: Trace, detail?: object): void {
       ...(data.minOrderSize !== undefined && { minOrderSize: numericDetail('minOrderSize') }),
       ...(data.entryPrice !== undefined && { entryPrice: numericDetail('entryPrice') }),
       ...(data.positionShares !== undefined && { positionShares: numericDetail('positionShares') }),
+      ...(data.sellLotShares !== undefined && { sellLotShares: numericDetail('sellLotShares') }),
+      ...(data.buyLotCount !== undefined && { buyLotCount: numericDetail('buyLotCount') }),
       ...(data.autoSellTarget !== undefined && { autoSellTarget: numericDetail('autoSellTarget') }),
     });
     let line: string;
@@ -460,14 +464,25 @@ function report(event: string, trace?: Trace, detail?: object): void {
       tone = 'warning';
     } else if (event.startsWith('DRY RUN ')) {
       const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
-      line = `模拟 ${side}｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`;
+      const submitted = numericDetail('submittedAmount');
+      const quote = numericDetail('quotePrice');
+      line = side === 'BUY'
+        ? `模拟 BUY｜花 ${numberText(submitted)} USD → 约 ${numberText(numericDetail('estimatedSharesAtQuote'))} 份｜盘口 ${numberText(quote)}`
+        : `模拟 SELL｜卖 ${numberText(submitted)} 份 → 约 ${numberText(submitted * quote)} USD｜盘口 ${numberText(quote)}`;
       tone = 'warning';
     } else if (event === 'MANUAL BUY' || event === 'MANUAL SELL'
       || event === 'AUTO BUY' || event === 'AUTO SELL') {
-      line = `${event.startsWith('AUTO') ? '自动' : '手动'} ${event.endsWith('BUY') ? 'BUY' : 'SELL'} 已提交｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`;
+      const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
+      const size = `${numberText(numericDetail('submittedAmount'))} ${side === 'BUY' ? 'USD' : '份'}`;
+      line = `${event.startsWith('AUTO') ? '自动' : '手动'} ${side} 已提交｜${size}｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`;
       tone = 'warning';
     } else if (event === 'ORDER SUCCESS') {
-      line = `订单成功｜${value('side')}｜均价 ${value('averageFillPrice')}`;
+      const side = value('side');
+      const making = numericDetail('makingAmount');
+      const taking = numericDetail('takingAmount');
+      line = side === 'BUY'
+        ? `订单成功｜BUY｜花 ${numberText(making)} USD → ${numberText(taking)} 份｜均价 ${value('averageFillPrice')}`
+        : `订单成功｜SELL｜卖 ${numberText(making)} 份 → ${numberText(taking)} USD｜均价 ${value('averageFillPrice')}`;
       tone = 'success';
     } else if (event === 'ORDER FAILED') {
       line = `下单失败｜${value('side')}｜${reasonText(data.reason ?? data.code ?? 'Polymarket rejected the order')}`;
@@ -484,9 +499,9 @@ async function main(): Promise<void> {
   const key = required('PRIVATE_KEY');
   if (!/^0x[0-9a-fA-F]{64}$/.test(key)) throw fault('Invalid PRIVATE_KEY format');
   const orderSize = numeric('ORDER_SIZE', 0.01, Number.MAX_SAFE_INTEGER);
-  const orderSizeUnit = process.env.ORDER_SIZE_UNIT ?? 'USD';
-  if (orderSizeUnit !== 'USD' && orderSizeUnit !== 'SHARES') {
-    throw fault('Invalid ORDER_SIZE_UNIT; use USD or SHARES');
+  const legacyOrderSizeUnit = process.env.ORDER_SIZE_UNIT;
+  if (legacyOrderSizeUnit !== undefined && legacyOrderSizeUnit !== 'USD') {
+    throw fault('ORDER_SIZE_UNIT must be USD; SELL now closes the latest BUY lot');
   }
   const autoSellProfitPercent = numeric('AUTO_SELL_PROFIT_PERCENT', 0, 100_000);
   const buySlippageEnabled = boolean('BUY_SLIPPAGE_ENABLED', true);
@@ -497,7 +512,7 @@ async function main(): Promise<void> {
   const debugUi = boolean('DEBUG_UI', false);
   updateUiState({
     mode: live ? '真实交易' : '模拟模式',
-    orderSize, orderSizeUnit, autoSellProfitPercent,
+    orderSize, autoSellProfitPercent,
     buySlippageEnabled, sellSlippageEnabled, buySlippage, sellSlippage,
     debug: debugUi,
   });
@@ -550,7 +565,7 @@ async function main(): Promise<void> {
   const tokenTicks = new Map<string, number>();
   const tokenMinOrderSizes = new Map<string, number>();
   const quotes = new Map<string, Quote>();
-  const costBasisByToken = new Map<string, CostBasis>();
+  const buyLotsByToken = new Map<string, BuyLot[]>();
   let activeSelection = 0;
   let tick = NaN;
   let minOrderSize = NaN;
@@ -571,10 +586,32 @@ async function main(): Promise<void> {
   let lastPong = 0;
   let lastQuote = 0n;
 
+  function latestLotFor(assetId = tokenId): BuyLot | undefined {
+    const lots = buyLotsByToken.get(assetId);
+    if (!lots) return undefined;
+    while (lots.length > 0 && lots[lots.length - 1].shares <= 1e-12) lots.pop();
+    if (lots.length === 0) {
+      buyLotsByToken.delete(assetId);
+      return undefined;
+    }
+    return lots[lots.length - 1];
+  }
+
+  function positionFor(assetId = tokenId): { shares: number; cost: number; count: number } {
+    const lots = buyLotsByToken.get(assetId) ?? [];
+    let shares = 0;
+    let cost = 0;
+    for (const lot of lots) {
+      shares += lot.shares;
+      cost += lot.cost;
+    }
+    return { shares, cost, count: lots.length };
+  }
+
   function entryPriceFor(assetId = tokenId): number | undefined {
-    const basis = costBasisByToken.get(assetId);
-    if (!basis || basis.shares <= 0 || basis.cost <= 0) return undefined;
-    return basis.cost / basis.shares;
+    const lot = latestLotFor(assetId);
+    if (!lot || lot.shares <= 0 || lot.cost <= 0) return undefined;
+    return lot.cost / lot.shares;
   }
 
   function autoSellTargetFor(assetId = tokenId): number | undefined {
@@ -582,40 +619,48 @@ async function main(): Promise<void> {
     return entryPrice === undefined ? undefined : entryPrice * (1 + autoSellProfitPercent / 100);
   }
 
+  function syncPositionUi(assetId: string): void {
+    if (assetId !== tokenId) return;
+    const position = positionFor(assetId);
+    const lot = latestLotFor(assetId);
+    const entryPrice = entryPriceFor(assetId);
+    updateUiState({
+      positionShares: position.shares,
+      buyLotCount: position.count,
+      sellLotShares: lot?.shares ?? 0,
+      entryPrice: entryPrice ?? NaN,
+      autoSellTarget: entryPrice === undefined
+        ? NaN : entryPrice * (1 + autoSellProfitPercent / 100),
+    });
+  }
+
   function recordBuy(assetId: string, shares: number, cost: number): void {
     if (!Number.isFinite(shares) || shares <= 0 || !Number.isFinite(cost) || cost <= 0) return;
-    const previous = costBasisByToken.get(assetId);
-    costBasisByToken.set(assetId, {
-      shares: (previous?.shares ?? 0) + shares,
-      cost: (previous?.cost ?? 0) + cost,
-    });
-    if (assetId === tokenId) {
-      const basis = costBasisByToken.get(assetId)!;
-      updateUiState({ positionShares: basis.shares, entryPrice: basis.cost / basis.shares,
-        autoSellTarget: basis.cost / basis.shares * (1 + autoSellProfitPercent / 100) });
-    }
+    const lots = buyLotsByToken.get(assetId) ?? [];
+    lots.push({ shares, cost });
+    buyLotsByToken.set(assetId, lots);
+    syncPositionUi(assetId);
   }
 
   function recordSell(assetId: string, shares: number): void {
-    const previous = costBasisByToken.get(assetId);
-    if (!previous || !Number.isFinite(shares) || shares <= 0) return;
-    const remainingShares = previous.shares - shares;
+    const lot = latestLotFor(assetId);
+    if (!lot || !Number.isFinite(shares) || shares <= 0) return;
+    const previousShares = lot.shares;
+    const remainingShares = previousShares - Math.min(shares, previousShares);
     if (remainingShares <= 1e-12) {
-      costBasisByToken.delete(assetId);
-      if (assetId === tokenId) updateUiState({ positionShares: 0, entryPrice: NaN, autoSellTarget: NaN });
-      return;
+      const lots = buyLotsByToken.get(assetId)!;
+      lots.pop();
+      if (lots.length === 0) buyLotsByToken.delete(assetId);
+    } else {
+      lot.shares = remainingShares;
+      lot.cost *= remainingShares / previousShares;
     }
-    costBasisByToken.set(assetId, {
-      shares: remainingShares,
-      cost: previous.cost * remainingShares / previous.shares,
-    });
-    if (assetId === tokenId) updateUiState({ positionShares: remainingShares,
-      entryPrice: previous.cost / previous.shares,
-      autoSellTarget: previous.cost / previous.shares * (1 + autoSellProfitPercent / 100) });
+    syncPositionUi(assetId);
   }
 
   function tokenDetail(): object {
-    const basis = costBasisByToken.get(tokenId);
+    const position = positionFor();
+    const lot = latestLotFor();
     const entryPrice = entryPriceFor();
     const autoSellTarget = autoSellTargetFor();
     return {
@@ -627,7 +672,9 @@ async function main(): Promise<void> {
       bestAsk: Number.isFinite(bestAsk) ? bestAsk : null,
       minOrderSize,
       entryPrice: entryPrice ?? null,
-      positionShares: basis?.shares ?? 0,
+      positionShares: position.shares,
+      buyLotCount: position.count,
+      sellLotShares: lot?.shares ?? 0,
       autoSellProfitPercent,
       autoSellTarget: autoSellTarget ?? null,
     };
@@ -646,10 +693,10 @@ async function main(): Promise<void> {
     const cacheStarted = now();
     // Sign and discard to warm the SDK metadata and both signing paths.
     await client.createMarketOrder({ assetId, side: OrderSide.BUY,
-      amount: orderSizeUnit === 'USD' ? orderSize : orderSize * 0.5,
+      amount: orderSize,
       maxPrice: 0.5, orderType: OrderType.FAK });
     await client.createMarketOrder({ assetId, side: OrderSide.SELL,
-      shares: orderSizeUnit === 'SHARES' ? orderSize : orderSize / 0.5,
+      shares: 1,
       minPrice: 0.5, orderType: OrderType.FAK });
     return {
       tick: preparedTick,
@@ -722,7 +769,8 @@ async function main(): Promise<void> {
     blocked = undefined;
     maintenance = false;
     updateUiState({ tokenId: activeAssetId, tick, minOrderSize, bestBid: NaN, bestAsk: NaN,
-      positionShares: 0, entryPrice: NaN, autoSellTarget: NaN,
+      positionShares: 0, sellLotShares: 0, buyLotCount: 0,
+      entryPrice: NaN, autoSellTarget: NaN,
       connection: '连接中', readiness: '等待行情', armed: false });
     clearTimeout(expiry);
     expiry = setTimeout(() => invalidate('Metadata lifetime exceeded; restart'),
@@ -769,7 +817,7 @@ async function main(): Promise<void> {
       marketAssets = selected.assets;
       selectedMarketStart = selected.start;
       selectedMarketSlug = selected.slug;
-      costBasisByToken.clear();
+      buyLotsByToken.clear();
       finishPreparation(
         [selected.assets.UP, selected.assets.DOWN],
         selected.assets[marketOutcome],
@@ -898,6 +946,7 @@ async function main(): Promise<void> {
     let price: number | undefined;
     let quotePrice: number | undefined;
     let estimatedSharesAtQuote: number | undefined;
+    let sellLotAtInvoke: BuyLot | undefined;
     let autoTargetAtInvoke: number | undefined;
     let autoTriggerReported = false;
     let ownsLock = false;
@@ -910,14 +959,14 @@ async function main(): Promise<void> {
       }
       quotePrice = side === OrderSide.BUY ? bestAsk : bestBid;
       if (!Number.isFinite(quotePrice) || quotePrice <= 0 || quotePrice >= 1) throw fault('Requested book side is empty');
-      estimatedSharesAtQuote = orderSizeUnit === 'SHARES' ? orderSize : orderSize / quotePrice;
-      if (estimatedSharesAtQuote + 1e-9 < minOrderSize) {
-        throw fault(`Order is about ${estimatedSharesAtQuote.toFixed(4)} shares; market minimum is ${minOrderSize} shares`);
-      }
       if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > bestAsk) throw fault('Crossed quote');
       const selection = activeSelection;
       const assetId = tokenId;
-      const bidAtInvoke = bestBid;
+      sellLotAtInvoke = side === OrderSide.SELL ? latestLotFor(assetId) : undefined;
+      if (side === OrderSide.SELL && sellLotAtInvoke === undefined) {
+        throw fault('No unsold BUY lot recorded for current token');
+      }
+      estimatedSharesAtQuote = side === OrderSide.BUY ? orderSize / quotePrice : sellLotAtInvoke!.shares;
       autoTargetAtInvoke = trace.source === 'AUTO' ? autoSellTargetFor(assetId) : undefined;
       busy = true;
       ownsLock = true;
@@ -928,16 +977,14 @@ async function main(): Promise<void> {
       let submittedUnit: 'USD' | 'SHARES';
       let order: Awaited<ReturnType<typeof client.createMarketOrder>>;
       if (side === OrderSide.BUY) {
-        // The SDK's FAK BUY input is USD. In SHARES mode, limit price converts
-        // the requested share count into the maximum signed USD amount.
-        submittedAmount = orderSizeUnit === 'USD' ? orderSize : orderSize * price;
+        // Like Polymarket's market ticket, BUY input is the configured USD spend.
+        submittedAmount = orderSize;
         submittedUnit = 'USD';
         order = await client.createMarketOrder({ assetId, side,
           amount: submittedAmount, maxPrice: price, orderType: OrderType.FAK });
       } else {
-        // The SDK's FAK SELL input is shares. USD mode sizes those shares from
-        // the current best bid; actual proceeds depend on partial fills/prices.
-        submittedAmount = orderSizeUnit === 'SHARES' ? orderSize : orderSize / bidAtInvoke;
+        // SELL closes the most recent unsold BUY lot; current price only determines proceeds.
+        submittedAmount = sellLotAtInvoke!.shares;
         submittedUnit = 'SHARES';
         order = await client.createMarketOrder({ assetId, side,
           shares: submittedAmount, minPrice: price, orderType: OrderType.FAK });
@@ -952,7 +999,7 @@ async function main(): Promise<void> {
         // Dispatch boundary only, NOT a real postOrder timestamp or HTTP latency.
         const dryDispatch = now();
         if (side === OrderSide.BUY) {
-          const simulatedShares = orderSizeUnit === 'SHARES' ? orderSize : submittedAmount / quotePrice;
+          const simulatedShares = submittedAmount / quotePrice;
           recordBuy(assetId, simulatedShares, simulatedShares * quotePrice);
         } else {
           recordSell(assetId, submittedAmount);
@@ -966,7 +1013,7 @@ async function main(): Promise<void> {
           ...tokenDetail(),
           estimatedSharesAtQuote, minOrderSize,
           orderType: 'FAK',
-          configuredSize: orderSize, configuredUnit: orderSizeUnit,
+          buyAmountUsd: orderSize,
           submittedAmount, submittedUnit,
           dry_dispatch_ns: dryDispatch.toString(),
           dry_ws_to_dispatch_us: trace.ws === undefined ? null : Number(dryDispatch - trace.ws) / 1e3,
@@ -986,7 +1033,7 @@ async function main(): Promise<void> {
       }
       report(`${trace.source} ${side}`, { ...trace }, { tokenId: assetId,
         quotePrice, limitPrice: price, estimatedSharesAtQuote, minOrderSize, orderType: 'FAK',
-        configuredSize: orderSize, configuredUnit: orderSizeUnit,
+        buyAmountUsd: orderSize,
         submittedAmount, submittedUnit });
       const response = await pending;
       trace.response = now();
@@ -1210,7 +1257,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', stop);
   report('READY', undefined, { live, tick, account: 'EOA',
     keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN Left=previous Right=next',
-    orderSize, orderSizeUnit, minOrderSize, autoFindMarket, marketOutcome,
+    orderSize, orderSizeUnit: 'USD_BUY_THEN_SELL_LATEST_LOT', minOrderSize, autoFindMarket, marketOutcome,
     autoSellProfitPercent, buySlippageEnabled, sellSlippageEnabled,
     market: selectedMarketSlug || null,
     session: selectedMarketStart ? formatSessionRange(selectedMarketStart) : null });
