@@ -8,6 +8,7 @@ const now = process.hrtime.bigint;
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const ORDER_URL = 'https://clob.polymarket.com/order';
 const GAMMA_URL = 'https://gamma-api.polymarket.com/markets/slug/';
+const POLYGON_RPC_URL = 'https://polygon.drpc.org';
 const MARKET_SECONDS = 300;
 type Language = 'zh' | 'en';
 let language: Language = 'zh';
@@ -47,6 +48,48 @@ function boolean(name: string, fallback: boolean): boolean {
   const value = process.env[name] ?? String(fallback);
   if (value !== 'true' && value !== 'false') throw fault(`Invalid ${name}`);
   return value === 'true';
+}
+
+function safeOrderFailure(error: unknown): { reason: string; errorType?: string; status?: number; code?: string } {
+  if (!(error instanceof Error)) return { reason: tr('SDK 请求失败', 'SDK request failed') };
+  if (error.name === 'ExecutorError') return { reason: error.message, errorType: error.name };
+
+  const record = error as Error & { status?: unknown; code?: unknown };
+  const status = typeof record.status === 'number' ? record.status : undefined;
+  const code = typeof record.code === 'string' && record.code.length <= 80 ? record.code : undefined;
+  // Keep only the SDK's short message. Never stringify the error/cause/request because those may contain auth headers.
+  const message = error.message
+    .replace(/\s*\(https?:\/\/[^)]+\)\s*/gi, ' ')
+    .replace(/0x[0-9a-f]{64,}/gi, '0x…')
+    .replace(/\b\d{40,}\b/g, '…')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+  const normalized = `${code ?? ''} ${message}`.toLowerCase();
+
+  let reason: string;
+  if (/balance|allowance|funds|collateral/.test(normalized)
+    && /insufficient|not enough|exceed|low|allowance/.test(normalized)) {
+    reason = tr('资金地址余额或交易授权不足', 'Funder balance or trading allowance is insufficient');
+  } else if (/invalid signature|signature.*invalid|could not sign/.test(normalized)) {
+    reason = tr('签名无效：请检查私钥与资金地址是否属于同一账户',
+      'Invalid signature: check that the private key controls the configured funder wallet');
+  } else if (/unauthorized|api key|authentication|auth /.test(normalized) || status === 401) {
+    reason = tr('API 凭证无效，请重新启动以重新派生凭证',
+      'API credentials were rejected; restart to derive them again');
+  } else if (/trading is currently disabled|closed.only|post.only/.test(normalized) || status === 503) {
+    reason = tr('Polymarket 当前暂停接受此订单', 'Polymarket is currently not accepting this order');
+  } else if (error.name === 'RateLimitError' || status === 429) {
+    reason = tr('请求过于频繁，请稍后再试', 'Rate limited; try again shortly');
+  } else if (error.name === 'TransportError') {
+    reason = tr(`网络请求失败${message ? `：${message}` : ''}`, `Network request failed${message ? `: ${message}` : ''}`);
+  } else {
+    const prefix = error.name === 'RequestRejectedError'
+      ? tr('Polymarket 拒绝订单', 'Polymarket rejected the order')
+      : tr('SDK 请求或签名失败', 'SDK request or signing failed');
+    reason = `${prefix}${status === undefined ? '' : ` (HTTP ${status})`}${message ? `：${message}` : ''}`;
+  }
+  return { reason, errorType: error.name, ...(status === undefined ? {} : { status }), ...(code ? { code } : {}) };
 }
 
 function validTokenId(value: string): boolean {
@@ -533,8 +576,8 @@ function report(event: string, trace?: Trace, detail?: object): void {
       const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
       const size = `${numberText(numericDetail('submittedAmount'))} ${side === 'BUY' ? 'USD' : tr('份', 'shares')}`;
       line = tr(
-        `${event.startsWith('AUTO') ? '自动' : '手动'} ${side} 已提交｜${size}｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`,
-        `${event.startsWith('AUTO') ? 'AUTO' : 'MANUAL'} ${side} submitted | ${size} | quote ${value('quotePrice')} → limit ${value('limitPrice')}`,
+        `${event.startsWith('AUTO') ? '自动' : '手动'} ${side} 正在发送｜${size}｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`,
+        `${event.startsWith('AUTO') ? 'AUTO' : 'MANUAL'} ${side} sending | ${size} | quote ${value('quotePrice')} → limit ${value('limitPrice')}`,
       );
       tone = 'warning';
     } else if (event === 'ORDER SUCCESS') {
@@ -567,6 +610,11 @@ async function main(): Promise<void> {
   language = configuredLanguage;
   const key = required('PRIVATE_KEY');
   if (!/^0x[0-9a-fA-F]{64}$/.test(key)) throw fault('Invalid PRIVATE_KEY format');
+  const configuredWallet = (process.env.POLYMARKET_WALLET ?? 'AUTO').trim();
+  if (configuredWallet !== 'AUTO' && configuredWallet !== 'EOA'
+    && !/^0x[0-9a-fA-F]{40}$/.test(configuredWallet)) {
+    throw fault('Invalid POLYMARKET_WALLET; use AUTO, EOA, or a 0x wallet address');
+  }
   const orderSize = numeric('ORDER_SIZE', 0.01, Number.MAX_SAFE_INTEGER);
   const legacyOrderSizeUnit = process.env.ORDER_SIZE_UNIT;
   if (legacyOrderSizeUnit !== undefined && legacyOrderSizeUnit !== 'USD') {
@@ -620,15 +668,19 @@ async function main(): Promise<void> {
       return Promise.reject(fault('Runtime REST blocked; restart to refresh metadata'));
     }
     // Maintenance may read market metadata. Only initial API credential setup may mutate.
-    if (maintenance && method !== 'GET' && !(credentialsReady === false && url.endsWith('/auth/api-key'))) {
+    const maintenanceRead = method === 'GET' || (method === 'POST' && url === POLYGON_RPC_URL);
+    if (maintenance && !maintenanceRead && !(credentialsReady === false && url.endsWith('/auth/api-key'))) {
       return Promise.reject(fault('Unexpected maintenance mutation blocked'));
     }
     return nativeFetch(input, init);
   };
 
   const signer = privateKey(key as `0x${string}`);
-  // Explicit EOA avoids SDK default deposit-wallet creation/deployment.
-  const client = await createSecureClient({ signer, wallet: await signer.getAddress() });
+  const signerAddress = await signer.getAddress();
+  // AUTO uses the SDK's deterministic Polymarket Deposit Wallet. EOA is available for standalone wallets.
+  const client = configuredWallet === 'AUTO'
+    ? await createSecureClient({ signer })
+    : await createSecureClient({ signer, wallet: configuredWallet === 'EOA' ? signerAddress : configuredWallet });
   credentialsReady = true;
 
   let tokenId = configuredTokenId;
@@ -1139,9 +1191,10 @@ async function main(): Promise<void> {
         report('AUTO SELL TRIGGER', undefined, { quotePrice, autoSellTarget: autoTargetAtInvoke });
       }
       // Never print SDK errors wholesale: they can contain requests/auth headers.
+      const failure = safeOrderFailure(error);
       report('ORDER FAILED', trace, { side, tokenId, quotePrice, limitPrice: price,
         estimatedSharesAtQuote, minOrderSize,
-        reason: error instanceof Error && error.name === 'ExecutorError' ? error.message : 'SDK request/signing failed',
+        ...failure,
         outcome: trace.post === undefined ? 'not submitted' : 'check exchange; no automatic retry' });
     } finally {
       // A rejected overlapping keypress must not release the active order's lock.
@@ -1333,7 +1386,7 @@ async function main(): Promise<void> {
   }
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
-  report('READY', undefined, { live, tick, account: 'EOA',
+  report('READY', undefined, { live, tick, account: String(client.account.walletType),
     keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN Left=previous Right=next',
     orderSize, orderSizeUnit: 'USD_BUY_THEN_SELL_LATEST_LOT', minOrderSize, autoFindMarket, marketOutcome,
     autoSellProfitPercent, buySlippageEnabled, sellSlippageEnabled,

@@ -35,6 +35,7 @@ LANGUAGE=zh
 # ===== 账户与市场 =====
 MARKET_OUTCOME=UP
 PRIVATE_KEY=0x你的私钥
+POLYMARKET_WALLET=AUTO
 # 市场在启动菜单选择
 
 # ===== 每次 BUY 花费 =====
@@ -76,7 +77,8 @@ LANGUAGE=zh
 | 参数 | 怎么填写 |
 | --- | --- |
 | `MARKET_OUTCOME` | 选择 Bitcoin 五分钟时交易 `UP` 或 `DOWN` |
-| `PRIVATE_KEY` | MetaMask 账户私钥，格式是 `0x` 加 64 位字符 |
+| `PRIVATE_KEY` | 控制 Polymarket 账户的本地钱包私钥，格式是 `0x` 加 64 位字符 |
+| `POLYMARKET_WALLET` | `AUTO` 使用该私钥对应的 Polymarket Deposit Wallet；`EOA` 直接使用私钥地址；也可填写指定资金钱包地址 |
 
 启动后只会出现两个选项：
 
@@ -94,7 +96,7 @@ MARKET_OUTCOME=UP
 
 想交易 Bitcoin 五分钟 DOWN 时，把它改成 `MARKET_OUTCOME=DOWN`。
 
-本程序使用私钥地址中的资金和持仓。Polymarket 网页显示的账户余额不一定和这个地址完全相同，因此第一次真实交易要使用很小的金额测试。
+一般保持 `POLYMARKET_WALLET=AUTO`。程序会通过官方 SDK 使用该私钥对应的 Polymarket Deposit Wallet，这通常就是网页账户持有余额的地址。如果你的账户是旧的 Proxy/Safe 钱包，可把这里改为 Polymarket 显示的完整资金钱包地址。只有资金直接放在私钥 EOA 地址中时才填写 `EOA`。
 
 ### 每次交易多少
 

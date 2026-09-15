@@ -27,6 +27,7 @@ LANGUAGE=zh
 
 MARKET_OUTCOME=UP
 PRIVATE_KEY=0x你的64位十六进制私钥
+POLYMARKET_WALLET=AUTO
 
 # 每按一次 B 花费的美元金额
 ORDER_SIZE=1
@@ -44,6 +45,8 @@ DEBUG_UI=false
 ```
 
 `config.txt` 已被 Git 忽略，不会推送到仓库。不要分享其中的私钥。
+
+`POLYMARKET_WALLET=AUTO` 会使用该私钥对应的 Polymarket Deposit Wallet，适合通常的网页账户。只有资金确实直接放在私钥地址中时才使用 `EOA`；也可以填写 Polymarket 资金钱包的完整 `0x...` 地址。
 
 ### 语言
 

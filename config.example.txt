@@ -5,6 +5,9 @@ LANGUAGE=zh
 # ===== 账户与 Bitcoin 五分钟方向 =====
 MARKET_OUTCOME=UP
 PRIVATE_KEY=0x_REPLACE_WITH_LOCAL_PRIVATE_KEY
+# AUTO=使用这个私钥对应的 Polymarket Deposit Wallet（网页账户通常用这个）
+# EOA=直接使用私钥地址；也可以填写指定的 0x 资金钱包地址
+POLYMARKET_WALLET=AUTO
 # 市场在启动菜单选择；选择其他市场时，程序会要求输入 Token ID
 
 # ===== 每次 BUY 花费 =====
