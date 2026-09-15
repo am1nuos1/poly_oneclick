@@ -9,6 +9,12 @@ const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const ORDER_URL = 'https://clob.polymarket.com/order';
 const GAMMA_URL = 'https://gamma-api.polymarket.com/markets/slug/';
 const MARKET_SECONDS = 300;
+type Language = 'zh' | 'en';
+let language: Language = 'zh';
+
+function tr(chinese: string, english: string): string {
+  return language === 'en' ? english : chinese;
+}
 
 function formatSessionRange(start: number): string {
   const clock = (seconds: number): string => {
@@ -62,7 +68,7 @@ async function chooseOption(title: string, options: string[]): Promise<number> {
     for (let index = 0; index < options.length; index++) {
       process.stdout.write(`${index === selected ? '▶' : ' '} ${options[index]}\n`);
     }
-    process.stdout.write('\n使用 ↑ ↓ 选择，按 Enter 确认。\n');
+    process.stdout.write(`\n${tr('使用 ↑ ↓ 选择，按 Enter 确认。', 'Use ↑ ↓ to select, then press Enter.')}\n`);
   };
   return new Promise(resolve => {
     const onKey = (_text: string, key: { name?: string; ctrl?: boolean }): void => {
@@ -83,7 +89,7 @@ async function chooseOption(title: string, options: string[]): Promise<number> {
 
 async function askTokenId(): Promise<string> {
   let value = '';
-  process.stdout.write('\x1b[2J\x1b[H请输入其他市场的 Token ID，然后按 Enter：\n\n');
+  process.stdout.write(`\x1b[2J\x1b[H${tr('请输入其他市场的 Token ID，然后按 Enter：', 'Enter the other market Token ID, then press Enter:')}\n\n`);
   return new Promise(resolve => {
     const onKey = (text: string, key: { name?: string; ctrl?: boolean }): void => {
       if (key?.ctrl && key.name === 'c') quitFromMenu();
@@ -96,7 +102,7 @@ async function askTokenId(): Promise<string> {
       }
       if (key?.name === 'return' || key?.name === 'enter') {
         if (!validTokenId(value)) {
-          process.stdout.write('\nToken ID 不正确，请重新输入：\n');
+          process.stdout.write(`\n${tr('Token ID 不正确，请重新输入：', 'Invalid Token ID. Please enter it again:')}\n`);
           value = '';
           return;
         }
@@ -138,8 +144,8 @@ type UiLatency = {
   breakdown: Array<{ label: string; duration: UiDuration }>;
 };
 type UiState = {
-  mode: '准备中' | '模拟模式' | '真实交易';
-  connection: '连接中' | '已连接' | '重连中' | '已断开';
+  mode: string;
+  connection: string;
   readiness: string;
   market: string;
   marketSlug: string;
@@ -193,17 +199,21 @@ function updateUiState(update: Partial<UiState>): void {
 function sessionStatus(): string {
   if (!uiState.sessionStart) return '';
   const current = Math.floor(Date.now() / 1000 / MARKET_SECONDS) * MARKET_SECONDS;
-  return uiState.sessionStart === current ? '【当期】' : uiState.sessionStart < current ? '【已结束】'
-    : uiState.sessionStart === current + MARKET_SECONDS ? '【下一期】' : '【未来场次】';
+  return uiState.sessionStart === current ? tr('【当期】', '[CURRENT]')
+    : uiState.sessionStart < current ? tr('【已结束】', '[ENDED]')
+      : uiState.sessionStart === current + MARKET_SECONDS ? tr('【下一期】', '[NEXT]')
+        : tr('【未来场次】', '[FUTURE]');
 }
 
 function sessionIndicator(): { label: string; tone: UiTone } {
-  if (!uiState.sessionStart) return { label: '未知', tone: 'warning' };
+  if (!uiState.sessionStart) return { label: tr('未知', 'Unknown'), tone: 'warning' };
   const current = Math.floor(Date.now() / 1000 / MARKET_SECONDS) * MARKET_SECONDS;
-  if (uiState.sessionStart === current) return { label: '当期进行中', tone: 'success' };
-  if (uiState.sessionStart < current) return { label: '已过期', tone: 'error' };
-  if (uiState.sessionStart === current + MARKET_SECONDS) return { label: '下一期（未开始）', tone: 'warning' };
-  return { label: '未来场次（未开始）', tone: 'warning' };
+  if (uiState.sessionStart === current) return { label: tr('当期进行中', 'Current session'), tone: 'success' };
+  if (uiState.sessionStart < current) return { label: tr('已过期', 'Expired'), tone: 'error' };
+  if (uiState.sessionStart === current + MARKET_SECONDS) {
+    return { label: tr('下一期（未开始）', 'Next session (not started)'), tone: 'warning' };
+  }
+  return { label: tr('未来场次（未开始）', 'Future session (not started)'), tone: 'warning' };
 }
 
 function numberText(value: number, digits = 4): string {
@@ -245,18 +255,20 @@ function renderPanel(): void {
   };
   const row = (text: string, tone: UiTone = 'normal'): string => paint(fit(text), tone);
   const strongRow = (text: string): string => emphasize(fit(text));
-  const summaryTone: UiTone = uiState.connection === '已断开' || uiState.connection === '重连中'
-    || uiState.mode === '真实交易' ? 'error'
-      : uiState.connection === '已连接' ? 'success' : 'warning';
+  const summaryTone: UiTone = uiState.connection === tr('已断开', 'Disconnected')
+    || uiState.connection === tr('重连中', 'Reconnecting')
+    || uiState.mode === tr('真实交易', 'LIVE TRADING') ? 'error'
+      : uiState.connection === tr('已连接', 'Connected') ? 'success' : 'warning';
   const session = sessionIndicator();
   const spread = Number.isFinite(uiState.bestBid) && Number.isFinite(uiState.bestAsk)
     ? uiState.bestAsk - uiState.bestBid : NaN;
-  const buyPrice = Number.isFinite(uiState.bestAsk) ? numberText(uiState.bestAsk) : '暂无报价';
-  const sellPrice = Number.isFinite(uiState.bestBid) ? numberText(uiState.bestBid) : '暂无报价';
-  const buySlip = uiState.buySlippageEnabled ? numberText(uiState.buySlippage) : '关闭';
-  const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : '关闭';
+  const buyPrice = Number.isFinite(uiState.bestAsk) ? numberText(uiState.bestAsk) : tr('暂无报价', 'No quote');
+  const sellPrice = Number.isFinite(uiState.bestBid) ? numberText(uiState.bestBid) : tr('暂无报价', 'No quote');
+  const buySlip = uiState.buySlippageEnabled ? numberText(uiState.buySlippage) : tr('关闭', 'Off');
+  const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : tr('关闭', 'Off');
   const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
-    : uiState.outcome === 'DOWN' ? '--- DOWN ---' : '品种 —';
+    : uiState.outcome === 'DOWN' ? '--- DOWN ---' : tr('品种 —', 'OUTCOME —');
+  const lotLabel = uiState.buyLotCount === 1 ? 'lot' : 'lots';
   const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 22));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
     paint(clip(`${item.at}  ${item.message}${item.count > 1 ? ` ×${item.count}` : ''}`, width).text, item.tone));
@@ -264,27 +276,42 @@ function renderPanel(): void {
   const latencyText = (value?: UiDuration): string => value ? `${value.ms.toFixed(3)} ms` : '—';
   const lines = [
     `┌${'─'.repeat(width)}┐`,
-    row(`POLY ONECLICK  |  ${uiState.mode}  |  行情 ${uiState.connection}  |  ${uiState.readiness}`, summaryTone),
-    row(`市场：${uiState.market}  |  ${uiState.outcome}  |  Token ${shortToken(uiState.tokenId)}`),
-    row(`场次状态：${session.label}`, session.tone),
-    row(`场次时间：${uiState.session}`),
+    row(`POLY ONECLICK  |  ${uiState.mode}  |  ${tr('行情', 'WS')} ${uiState.connection}  |  ${uiState.readiness}`, summaryTone),
+    row(`${tr('市场：', 'Market: ')}${uiState.market}  |  ${uiState.outcome}  |  Token ${shortToken(uiState.tokenId)}`),
+    row(`${tr('场次状态：', 'Session status: ')}${session.label}`, session.tone),
+    row(`${tr('场次时间：', 'Session: ')}${uiState.session}`),
     `├${'─'.repeat(width)}┤`,
     strongRow(outcomeBanner),
-    strongRow('当前可成交价格'),
-    strongRow(`BUY  买入价    ${buyPrice}    (Best Ask)`),
-    strongRow(`SELL 卖出价    ${sellPrice}    (Best Bid)`),
-    row(`买卖价差：${numberText(spread)}`),
+    strongRow(tr('当前可成交价格', 'CURRENT EXECUTABLE PRICES')),
+    strongRow(`${tr('BUY  买入价', 'BUY   Price')}    ${buyPrice}    (Best Ask)`),
+    strongRow(`${tr('SELL 卖出价', 'SELL  Price')}    ${sellPrice}    (Best Bid)`),
+    row(`${tr('买卖价差：', 'Spread: ')}${numberText(spread)}`),
     `├${'─'.repeat(width)}┤`,
-    row(`每次 BUY：${numberText(uiState.orderSize)} USD  |  SELL：最近一笔 BUY 的剩余份额`),
-    row(`本次记录：${numberText(uiState.positionShares)} 份（${uiState.buyLotCount} 笔）  |  Tick ${numberText(uiState.tick)}`),
-    row(`下一次 SELL：${numberText(uiState.sellLotShares)} 份 @ 成本 ${numberText(uiState.entryPrice)}  |  目标 ${numberText(uiState.autoSellTarget)}`),
-    row(`自动卖出：${uiState.armed ? '已开启' : '关闭'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  滑点 买 ${buySlip} / 卖 ${sellSlip}`,
+    row(tr(
+      `每次 BUY：${numberText(uiState.orderSize)} USD  |  SELL：最近一笔 BUY 的剩余份额`,
+      `Each BUY: ${numberText(uiState.orderSize)} USD  |  SELL: latest BUY lot balance`,
+    )),
+    row(tr(
+      `本次记录：${numberText(uiState.positionShares)} 份（${uiState.buyLotCount} 笔）  |  Tick ${numberText(uiState.tick)}`,
+      `Recorded: ${numberText(uiState.positionShares)} shares (${uiState.buyLotCount} ${lotLabel})  |  Tick ${numberText(uiState.tick)}`,
+    )),
+    row(tr(
+      `下一次 SELL：${numberText(uiState.sellLotShares)} 份 @ 成本 ${numberText(uiState.entryPrice)}  |  目标 ${numberText(uiState.autoSellTarget)}`,
+      `Next SELL: ${numberText(uiState.sellLotShares)} shares @ cost ${numberText(uiState.entryPrice)}  |  Target ${numberText(uiState.autoSellTarget)}`,
+    )),
+    row(tr(
+      `自动卖出：${uiState.armed ? '已开启' : '关闭'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  滑点 买 ${buySlip} / 卖 ${sellSlip}`,
+      `Auto sell: ${uiState.armed ? 'Armed' : 'Off'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  Slippage B ${buySlip} / S ${sellSlip}`,
+    ),
       uiState.armed ? 'success' : 'normal'),
     `└${'─'.repeat(width)}┘`,
-    clip('  B买  S卖  A自动  Tab切UP/DOWN  ←上期  →下期  Ctrl+C退出', width).text,
-    '最近事件',
-    ...(visibleEvents.length ? visibleEvents : ['暂无事件']),
-    '最近延迟',
+    clip(tr(
+      '  B买  S卖  A自动  Tab切UP/DOWN  ←上期  →下期  Ctrl+C退出',
+      '  B Buy  S Sell  A Auto  Tab UP/DOWN  ← Prev  → Next  Ctrl+C Exit',
+    ), width).text,
+    tr('最近事件', 'RECENT EVENTS'),
+    ...(visibleEvents.length ? visibleEvents : [tr('暂无事件', 'No events')]),
+    tr('最近延迟', 'LAST LATENCY'),
     `${latency?.firstLabel ?? 'Input → Post'}    ${latencyText(latency?.first)}`,
     `Post → Response    ${latencyText(latency?.response)}`,
     `Total              ${latencyText(latency?.total)}`,
@@ -336,14 +363,30 @@ function report(event: string, trace?: Trace, detail?: object): void {
       ? '-' : String(data[name]);
     const reasonText = (raw: unknown): string => {
       const reason = String(raw ?? '');
-      if (reason === 'The selected market has already ended') return '该场次已结束';
-      if (reason === 'BTC five-minute market was not found') return '该场次不存在或尚未生成';
-      if (reason === 'BTC five-minute market is not open for trading') return '该场次尚未开放交易';
-      if (reason === 'An order is currently being submitted') return '上一笔订单还在提交';
-      if (reason === 'Market switch already in progress') return '市场切换进行中';
-      if (reason === 'Only available in Bitcoin five-minute mode') return '仅 Bitcoin 五分钟模式可用';
-      if (reason === 'No unsold BUY lot recorded for current token') return '当前品种没有可卖的 BUY 批次';
-      return reason || '未知原因';
+      const translations: Record<string, string> = {
+        'The selected market has already ended': tr('该场次已结束', 'The selected session has ended'),
+        'BTC five-minute market was not found': tr('该场次不存在或尚未生成', 'The session does not exist or is not ready'),
+        'BTC five-minute market is not open for trading': tr('该场次尚未开放交易', 'The session is not open for trading'),
+        'An order is currently being submitted': tr('上一笔订单还在提交', 'Another order is still being submitted'),
+        'Another order is in flight': tr('上一笔订单还在提交', 'Another order is still being submitted'),
+        'Market switch already in progress': tr('市场切换进行中', 'A market switch is already in progress'),
+        'Only available in Bitcoin five-minute mode': tr('仅 Bitcoin 五分钟模式可用', 'Only available in Bitcoin five-minute mode'),
+        'Only available for Bitcoin five-minute market': tr('仅 Bitcoin 五分钟模式可用', 'Only available in Bitcoin five-minute mode'),
+        'Current market is not ready': tr('当前市场尚未准备完成', 'The current market is not ready'),
+        'Token is not prepared': tr('Token 尚未准备完成', 'The token is not ready'),
+        'No unsold BUY lot recorded for current token': tr('当前品种没有可卖的 BUY 批次', 'No unsold BUY lot for this outcome'),
+        'No BUY entry recorded for current token in this run': tr('本次运行尚未买入当前品种', 'No BUY recorded for this outcome in this run'),
+        'No fresh WebSocket quote': tr('没有新鲜的 WebSocket 行情', 'No fresh WebSocket quote'),
+        'Requested book side is empty': tr('当前方向没有可成交报价', 'The requested side has no executable quote'),
+        'Metadata expired; restart': tr('市场信息已过期，请重启', 'Market metadata expired; restart'),
+        'Metadata lifetime exceeded; restart': tr('市场信息已过期，请重启', 'Market metadata expired; restart'),
+        'Market resolved': tr('市场已经结算', 'Market resolved'),
+        'Tick size changed; restart to refresh SDK metadata': tr('Tick 已变化，请重启', 'Tick size changed; restart'),
+        'Trading state changed during signing': tr('签名期间市场状态发生变化，订单未发送', 'Trading state changed during signing; order not sent'),
+        'Changing BTC 5-minute market': tr('正在切换 BTC 五分钟市场', 'Changing BTC five-minute market'),
+        'SDK request/signing failed': tr('SDK 请求或签名失败', 'SDK request or signing failed'),
+      };
+      return translations[reason] ?? (reason || tr('未知原因', 'Unknown reason'));
     };
     const dryDispatchUs = Number(data.dry_input_to_dispatch_us ?? data.dry_ws_to_dispatch_us
       ?? data.dry_trigger_to_dispatch_us);
@@ -402,93 +445,111 @@ function report(event: string, trace?: Trace, detail?: object): void {
     let tone: UiTone = 'normal';
 
     if (event === 'READY') {
-      updateUiState({ mode: data.live ? '真实交易' : '模拟模式',
-        readiness: uiState.connection === '已连接' && Number.isFinite(uiState.bestBid)
-          && Number.isFinite(uiState.bestAsk) ? '可以交易' : '等待行情' });
-      line = '准备完成';
+      updateUiState({ mode: data.live ? tr('真实交易', 'LIVE TRADING') : tr('模拟模式', 'DRY RUN'),
+        readiness: uiState.connection === tr('已连接', 'Connected') && Number.isFinite(uiState.bestBid)
+          && Number.isFinite(uiState.bestAsk) ? tr('可以交易', 'Ready') : tr('等待行情', 'Waiting for quotes') });
+      line = tr('准备完成', 'Ready');
       tone = data.live ? 'error' : 'warning';
     } else if (event === 'WS CONNECTED') {
-      updateUiState({ connection: '已连接', readiness: Number.isFinite(uiState.bestBid)
-        && Number.isFinite(uiState.bestAsk) ? '可以交易' : '等待报价' });
-      line = '行情已连接';
+      updateUiState({ connection: tr('已连接', 'Connected'), readiness: Number.isFinite(uiState.bestBid)
+        && Number.isFinite(uiState.bestAsk) ? tr('可以交易', 'Ready') : tr('等待报价', 'Waiting for quotes') });
+      line = tr('行情已连接', 'Market feed connected');
       tone = 'success';
     } else if (event === 'WS DISCONNECTED') {
-      updateUiState({ connection: '重连中', readiness: '不可交易', armed: false,
+      updateUiState({ connection: tr('重连中', 'Reconnecting'), readiness: tr('不可交易', 'Not ready'), armed: false,
         bestBid: NaN, bestAsk: NaN });
-      line = '行情已断开，正在重连；自动卖出已关闭';
+      line = tr('行情已断开，正在重连；自动卖出已关闭', 'Market feed disconnected; reconnecting; auto sell disarmed');
       tone = 'error';
     } else if (event === 'MARKET SELECTED' || event === 'MARKET SWITCHED') {
-      updateUiState({ market: data.mode === 'AUTO' ? 'BTC 5M' : '其他市场',
+      updateUiState({ market: data.mode === 'AUTO' ? 'BTC 5M' : tr('其他市场', 'Other market'),
         marketSlug: value('market'), session: value('session'), sessionStart: Number(data.sessionStart) || 0,
-        outcome: value('outcome'), connection: '连接中', readiness: '等待行情', armed: false });
-      line = `${event === 'MARKET SWITCHED' ? '切换成功' : '市场已选择'} → ${uiState.session} ${sessionStatus()} ${uiState.outcome}`;
+        outcome: value('outcome'), connection: tr('连接中', 'Connecting'), readiness: tr('等待行情', 'Waiting for quotes'), armed: false });
+      line = `${event === 'MARKET SWITCHED' ? tr('切换成功', 'Switch successful') : tr('市场已选择', 'Market selected')} → ${uiState.session} ${sessionStatus()} ${uiState.outcome}`;
       tone = 'success';
     } else if (event === 'MARKET SWITCHING') {
-      updateUiState({ armed: false, readiness: '正在切换市场' });
-      line = `${data.direction === 'NEXT' ? '正在前往下一期' : '正在返回上一期'}…`;
+      updateUiState({ armed: false, readiness: tr('正在切换市场', 'Switching market') });
+      line = `${data.direction === 'NEXT' ? tr('正在前往下一期', 'Moving to next session') : tr('正在返回上一期', 'Moving to previous session')}…`;
       tone = 'warning';
     } else if (event === 'MARKET SWITCH FAILED') {
-      updateUiState({ readiness: uiState.connection === '已连接' ? '可以交易' : '等待行情' });
-      line = `切换失败：${data.direction === 'NEXT' ? '无法前往下一期' : '无法返回上一期'}，${reasonText(data.reason)}；仍在 ${uiState.session}`;
+      updateUiState({ readiness: uiState.connection === tr('已连接', 'Connected')
+        ? tr('可以交易', 'Ready') : tr('等待行情', 'Waiting for quotes') });
+      line = tr(
+        `切换失败：${data.direction === 'NEXT' ? '无法前往下一期' : '无法返回上一期'}，${reasonText(data.reason)}；仍在 ${uiState.session}`,
+        `Switch failed: cannot move ${data.direction === 'NEXT' ? 'to next' : 'to previous'} session; ${reasonText(data.reason)}; still on ${uiState.session}`,
+      );
       tone = 'error';
     } else if (event === 'MARKET SEARCH RETRY') {
-      line = `下一期暂未就绪，正在重试｜${reasonText(data.reason)}`;
+      line = tr(`下一期暂未就绪，正在重试｜${reasonText(data.reason)}`,
+        `Next session is not ready; retrying | ${reasonText(data.reason)}`);
       tone = 'warning';
     } else if (event === 'CURRENT TOKEN') {
       updateUiState({ outcome: value('outcome'), armed: false,
         readiness: Number.isFinite(numericDetail('bestBid')) && Number.isFinite(numericDetail('bestAsk'))
-          ? '可以交易' : '等待报价' });
-      line = `品种切换成功 → ${uiState.outcome}`;
+          ? tr('可以交易', 'Ready') : tr('等待报价', 'Waiting for quotes') });
+      line = tr(`品种切换成功 → ${uiState.outcome}`, `Outcome switched → ${uiState.outcome}`);
       tone = 'success';
     } else if (event === 'ARMED') {
       updateUiState({ armed: true });
-      line = `自动卖出已开启｜${value('outcome')}｜目标价 ${value('autoSellTarget')}`;
+      line = tr(`自动卖出已开启｜${value('outcome')}｜目标价 ${value('autoSellTarget')}`,
+        `Auto sell armed | ${value('outcome')} | target ${value('autoSellTarget')}`);
       tone = 'success';
     } else if (event === 'DISARMED') {
       updateUiState({ armed: false });
-      line = '自动卖出已关闭';
+      line = tr('自动卖出已关闭', 'Auto sell disarmed');
       tone = 'warning';
     } else if (event === 'ARM FAILED') {
-      line = `无法开启自动卖出｜${reasonText(data.reason)}`;
+      line = tr(`无法开启自动卖出｜${reasonText(data.reason)}`,
+        `Cannot arm auto sell | ${reasonText(data.reason)}`);
       tone = 'error';
     } else if (event === 'TAB SWITCH UNAVAILABLE' || event === 'OUTCOME SWITCH FAILED') {
-      line = `无法切换品种｜${value('reason')}`;
+      line = tr(`无法切换品种｜${reasonText(data.reason)}`,
+        `Cannot switch outcome | ${reasonText(data.reason)}`);
       tone = 'error';
     } else if (event === 'OUTCOME SWITCH QUEUED') {
-      line = `市场切换完成后将使用 ${value('outcome')}`;
+      line = tr(`市场切换完成后将使用 ${value('outcome')}`,
+        `Will use ${value('outcome')} after the market switch`);
       tone = 'warning';
     } else if (event === 'TRADING DISABLED') {
-      updateUiState({ armed: false, readiness: '交易已暂停' });
-      line = `交易已暂停｜${value('reason')}`;
+      updateUiState({ armed: false, readiness: tr('交易已暂停', 'Trading disabled') });
+      line = tr(`交易已暂停｜${reasonText(data.reason)}`, `Trading disabled | ${reasonText(data.reason)}`);
       tone = 'error';
     } else if (event === 'AUTO SELL TRIGGER') {
       updateUiState({ armed: false });
-      line = `自动卖出触发｜买价 ${value('quotePrice')} ≥ 目标 ${value('autoSellTarget')}`;
+      line = tr(`自动卖出触发｜买价 ${value('quotePrice')} ≥ 目标 ${value('autoSellTarget')}`,
+        `Auto sell triggered | bid ${value('quotePrice')} ≥ target ${value('autoSellTarget')}`);
       tone = 'warning';
     } else if (event.startsWith('DRY RUN ')) {
       const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
       const submitted = numericDetail('submittedAmount');
       const quote = numericDetail('quotePrice');
       line = side === 'BUY'
-        ? `模拟 BUY｜花 ${numberText(submitted)} USD → 约 ${numberText(numericDetail('estimatedSharesAtQuote'))} 份｜盘口 ${numberText(quote)}`
-        : `模拟 SELL｜卖 ${numberText(submitted)} 份 → 约 ${numberText(submitted * quote)} USD｜盘口 ${numberText(quote)}`;
+        ? tr(`模拟 BUY｜花 ${numberText(submitted)} USD → 约 ${numberText(numericDetail('estimatedSharesAtQuote'))} 份｜盘口 ${numberText(quote)}`,
+          `DRY BUY | spend ${numberText(submitted)} USD → about ${numberText(numericDetail('estimatedSharesAtQuote'))} shares | quote ${numberText(quote)}`)
+        : tr(`模拟 SELL｜卖 ${numberText(submitted)} 份 → 约 ${numberText(submitted * quote)} USD｜盘口 ${numberText(quote)}`,
+          `DRY SELL | sell ${numberText(submitted)} shares → about ${numberText(submitted * quote)} USD | quote ${numberText(quote)}`);
       tone = 'warning';
     } else if (event === 'MANUAL BUY' || event === 'MANUAL SELL'
       || event === 'AUTO BUY' || event === 'AUTO SELL') {
       const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
-      const size = `${numberText(numericDetail('submittedAmount'))} ${side === 'BUY' ? 'USD' : '份'}`;
-      line = `${event.startsWith('AUTO') ? '自动' : '手动'} ${side} 已提交｜${size}｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`;
+      const size = `${numberText(numericDetail('submittedAmount'))} ${side === 'BUY' ? 'USD' : tr('份', 'shares')}`;
+      line = tr(
+        `${event.startsWith('AUTO') ? '自动' : '手动'} ${side} 已提交｜${size}｜盘口 ${value('quotePrice')} → 限价 ${value('limitPrice')}`,
+        `${event.startsWith('AUTO') ? 'AUTO' : 'MANUAL'} ${side} submitted | ${size} | quote ${value('quotePrice')} → limit ${value('limitPrice')}`,
+      );
       tone = 'warning';
     } else if (event === 'ORDER SUCCESS') {
       const side = value('side');
       const making = numericDetail('makingAmount');
       const taking = numericDetail('takingAmount');
       line = side === 'BUY'
-        ? `订单成功｜BUY｜花 ${numberText(making)} USD → ${numberText(taking)} 份｜均价 ${value('averageFillPrice')}`
-        : `订单成功｜SELL｜卖 ${numberText(making)} 份 → ${numberText(taking)} USD｜均价 ${value('averageFillPrice')}`;
+        ? tr(`订单成功｜BUY｜花 ${numberText(making)} USD → ${numberText(taking)} 份｜均价 ${value('averageFillPrice')}`,
+          `Order success | BUY | spent ${numberText(making)} USD → ${numberText(taking)} shares | avg ${value('averageFillPrice')}`)
+        : tr(`订单成功｜SELL｜卖 ${numberText(making)} 份 → ${numberText(taking)} USD｜均价 ${value('averageFillPrice')}`,
+          `Order success | SELL | sold ${numberText(making)} shares → ${numberText(taking)} USD | avg ${value('averageFillPrice')}`);
       tone = 'success';
     } else if (event === 'ORDER FAILED') {
-      line = `下单失败｜${value('side')}｜${reasonText(data.reason ?? data.code ?? 'Polymarket rejected the order')}`;
+      line = tr(`下单失败｜${value('side')}｜${reasonText(data.reason ?? data.code ?? 'Polymarket rejected the order')}`,
+        `Order failed | ${value('side')} | ${reasonText(data.reason ?? data.code ?? 'Polymarket rejected the order')}`);
       tone = 'error';
     } else {
       line = data.reason ? `${event}｜${value('reason')}` : event;
@@ -499,6 +560,11 @@ function report(event: string, trace?: Trace, detail?: object): void {
 }
 
 async function main(): Promise<void> {
+  const configuredLanguage = (process.env.LANGUAGE ?? 'zh').trim().toLowerCase();
+  if (configuredLanguage !== 'zh' && configuredLanguage !== 'en') {
+    throw fault('Invalid LANGUAGE; use zh or en');
+  }
+  language = configuredLanguage;
   const key = required('PRIVATE_KEY');
   if (!/^0x[0-9a-fA-F]{64}$/.test(key)) throw fault('Invalid PRIVATE_KEY format');
   const orderSize = numeric('ORDER_SIZE', 0.01, Number.MAX_SAFE_INTEGER);
@@ -514,7 +580,9 @@ async function main(): Promise<void> {
   const live = boolean('LIVE_TRADING', false);
   const debugUi = boolean('DEBUG_UI', false);
   updateUiState({
-    mode: live ? '真实交易' : '模拟模式',
+    mode: live ? tr('真实交易', 'LIVE TRADING') : tr('模拟模式', 'DRY RUN'),
+    connection: tr('连接中', 'Connecting'),
+    readiness: tr('正在准备', 'Preparing'),
     orderSize, autoSellProfitPercent,
     buySlippageEnabled, sellSlippageEnabled, buySlippage, sellSlippage,
     debug: debugUi,
@@ -524,7 +592,10 @@ async function main(): Promise<void> {
   emitKeypressEvents(process.stdin);
   process.stdin.setRawMode(true);
   process.stdin.resume();
-  const marketChoice = await chooseOption('选择市场', ['Bitcoin 五分钟', '其他市场']);
+  const marketChoice = await chooseOption(
+    tr('选择市场', 'Select market'),
+    [tr('Bitcoin 五分钟', 'Bitcoin five-minute'), tr('其他市场', 'Other market')],
+  );
   const autoFindMarket = marketChoice === 0;
   const configuredOutcome = (process.env.MARKET_OUTCOME ?? 'UP').trim().toUpperCase();
   if (configuredOutcome !== 'UP' && configuredOutcome !== 'DOWN') {
@@ -535,7 +606,7 @@ async function main(): Promise<void> {
   if (!autoFindMarket) {
     configuredTokenId = await askTokenId();
   }
-  process.stdout.write('\x1b[2J\x1b[H正在连接 Polymarket...\n');
+  process.stdout.write(`\x1b[2J\x1b[H${tr('正在连接 Polymarket...', 'Connecting to Polymarket...')}\n`);
 
   // A last-line network guard also blocks SDK cache misses and error-recovery GETs.
   // Install before creating the long-lived SDK HTTP clients (ky captures fetch).
@@ -774,7 +845,7 @@ async function main(): Promise<void> {
     updateUiState({ tokenId: activeAssetId, tick, minOrderSize, bestBid: NaN, bestAsk: NaN,
       positionShares: 0, sellLotShares: 0, buyLotCount: 0,
       entryPrice: NaN, autoSellTarget: NaN,
-      connection: '连接中', readiness: '等待行情', armed: false });
+      connection: tr('连接中', 'Connecting'), readiness: tr('等待行情', 'Waiting for quotes'), armed: false });
     clearTimeout(expiry);
     expiry = setTimeout(() => invalidate('Metadata lifetime exceeded; restart'),
       Math.max(0, Number(cacheDeadline - now()) / 1e6));
@@ -927,7 +998,8 @@ async function main(): Promise<void> {
     bestBid = bestAsk = NaN;
     armed = false;
     blocked = reason;
-    updateUiState({ bestBid: NaN, bestAsk: NaN, armed: false, readiness: '交易已暂停' });
+    updateUiState({ bestBid: NaN, bestAsk: NaN, armed: false,
+      readiness: tr('交易已暂停', 'Trading disabled') });
     report('TRADING DISABLED', undefined, { reason });
   }
 
@@ -974,7 +1046,7 @@ async function main(): Promise<void> {
       busy = true;
       ownsLock = true;
       uiRenderBlocked = true;
-      updateUiState({ readiness: '正在下单' });
+      updateUiState({ readiness: tr('正在下单', 'Submitting order') });
       price = priceFor(side);
       let submittedAmount: number;
       let submittedUnit: 'USD' | 'SHARES';
@@ -1076,8 +1148,9 @@ async function main(): Promise<void> {
       if (ownsLock) {
         uiRenderBlocked = false;
         busy = false;
-        updateUiState({ readiness: blocked ? '不可交易'
-          : Number.isFinite(bestBid) && Number.isFinite(bestAsk) ? '可以交易' : '等待报价' });
+        updateUiState({ readiness: blocked ? tr('不可交易', 'Not ready')
+          : Number.isFinite(bestBid) && Number.isFinite(bestAsk)
+            ? tr('可以交易', 'Ready') : tr('等待报价', 'Waiting for quotes') });
       }
     }
   }
@@ -1096,7 +1169,8 @@ async function main(): Promise<void> {
     bestAsk = ask;
     lastQuote = received;
     updateUiState({ bestBid: bid, bestAsk: ask,
-      readiness: Number.isFinite(bid) && Number.isFinite(ask) && !blocked ? '可以交易' : '等待报价' });
+      readiness: Number.isFinite(bid) && Number.isFinite(ask) && !blocked
+        ? tr('可以交易', 'Ready') : tr('等待报价', 'Waiting for quotes') });
     return true;
   }
 
@@ -1163,7 +1237,8 @@ async function main(): Promise<void> {
     quotes.clear();
     bestBid = bestAsk = NaN;
     lastQuote = 0n;
-    updateUiState({ connection: '连接中', readiness: '等待行情', bestBid: NaN, bestAsk: NaN });
+    updateUiState({ connection: tr('连接中', 'Connecting'),
+      readiness: tr('等待行情', 'Waiting for quotes'), bestBid: NaN, bestAsk: NaN });
     const generation = ++connectionGeneration;
     const ws = new WebSocket(WS_URL, { perMessageDeflate: false, handshakeTimeout: 10_000 });
     socket = ws;

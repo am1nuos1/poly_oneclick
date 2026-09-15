@@ -1,3 +1,7 @@
+# ===== 界面语言 / Interface language =====
+# zh=中文，en=English
+LANGUAGE=zh
+
 # ===== 账户与 Bitcoin 五分钟方向 =====
 MARKET_OUTCOME=UP
 PRIVATE_KEY=0x_REPLACE_WITH_LOCAL_PRIVATE_KEY

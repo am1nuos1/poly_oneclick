@@ -29,6 +29,9 @@ LIVE_TRADING=false
 ## 2. 完整配置
 
 ```ini
+# ===== 界面语言 =====
+LANGUAGE=zh
+
 # ===== 账户与市场 =====
 MARKET_OUTCOME=UP
 PRIVATE_KEY=0x你的私钥
@@ -56,6 +59,17 @@ DEBUG_UI=false
 注意：等号两边不要有空格，不要给值加引号，`true` 和 `false` 必须小写。修改配置后需要重新启动程序。不要分享 `config.txt`，里面有你的私钥。
 
 ## 3. 每个参数是什么意思
+
+### 界面语言
+
+```ini
+LANGUAGE=zh
+```
+
+- `LANGUAGE=zh`：终端显示中文。
+- `LANGUAGE=en`：终端显示英文。
+
+修改后保存 `config.txt` 并重新启动程序。交易方式和按键不会因为语言变化。
 
 ### 账户与市场
 
@@ -85,6 +99,8 @@ MARKET_OUTCOME=UP
 ### 每次交易多少
 
 ```ini
+LANGUAGE=zh
+
 ORDER_SIZE=1
 ```
 
