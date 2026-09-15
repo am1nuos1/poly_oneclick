@@ -255,7 +255,9 @@ function renderPanel(): void {
   const sellPrice = Number.isFinite(uiState.bestBid) ? numberText(uiState.bestBid) : '暂无报价';
   const buySlip = uiState.buySlippageEnabled ? numberText(uiState.buySlippage) : '关闭';
   const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : '关闭';
-  const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 21));
+  const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
+    : uiState.outcome === 'DOWN' ? '--- DOWN ---' : '品种 —';
+  const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 22));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
     paint(clip(`${item.at}  ${item.message}${item.count > 1 ? ` ×${item.count}` : ''}`, width).text, item.tone));
   const latency = uiState.latency;
@@ -267,6 +269,7 @@ function renderPanel(): void {
     row(`场次状态：${session.label}`, session.tone),
     row(`场次时间：${uiState.session}`),
     `├${'─'.repeat(width)}┤`,
+    strongRow(outcomeBanner),
     strongRow('当前可成交价格'),
     strongRow(`BUY  买入价    ${buyPrice}    (Best Ask)`),
     strongRow(`SELL 卖出价    ${sellPrice}    (Best Bid)`),
