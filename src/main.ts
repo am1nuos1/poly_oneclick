@@ -11,6 +11,8 @@ const ORDER_URL = 'https://clob.polymarket.com/order';
 const GAMMA_URL = 'https://gamma-api.polymarket.com/markets/slug/';
 const POLYGON_RPC_URL = 'https://polygon.drpc.org';
 const MARKET_SECONDS = 300;
+const ORDER_AMOUNT_SCALE = 1_000_000;
+const SELL_SHARE_QUANTUM = 0.01;
 const monotonicOrigin = process.hrtime.bigint();
 const wallClockOriginMs = Date.now();
 type Language = 'zh' | 'en';
@@ -78,6 +80,18 @@ function boolean(name: string, fallback: boolean): boolean {
   return value === 'true';
 }
 
+// Match @polymarket/client's market SELL rounding: token shares are scaled to
+// 1e6, then rounded down to two decimal places before the order is signed.
+function quantizeSellShares(shares: number): number {
+  if (!Number.isFinite(shares) || shares <= 0) return 0;
+  const scaled = shares * ORDER_AMOUNT_SCALE;
+  const candidate = Math.round(scaled);
+  const maxDrift = 8 * Number.EPSILON * Math.max(1, Math.abs(scaled));
+  const normalized = Math.abs(scaled - candidate) <= maxDrift ? candidate : Math.trunc(scaled);
+  const quantumScaled = SELL_SHARE_QUANTUM * ORDER_AMOUNT_SCALE;
+  return Math.floor(normalized / quantumScaled) * SELL_SHARE_QUANTUM;
+}
+
 function safeOrderFailure(error: unknown): { reason: string; errorType?: string; status?: number; code?: string } {
   if (!(error instanceof Error)) return { reason: tr('SDK 请求失败', 'SDK request failed') };
   if (error.name === 'ExecutorError') return { reason: error.message, errorType: error.name };
@@ -99,6 +113,9 @@ function safeOrderFailure(error: unknown): { reason: string; errorType?: string;
   if (/no orders found to match.*fak/.test(normalized)) {
     reason = tr('FAK 未成交：订单到达时，限价内已无可卖订单；没有扣款',
       'FAK not filled: no sell order remained within the limit price when it arrived; no funds were spent');
+  } else if (/invalid maker amount/.test(normalized)) {
+    reason = tr('SELL 数量无法生成有效订单；可提交份额必须至少为 0.01',
+      'The SELL size cannot form a valid order; submit-able shares must be at least 0.01');
   } else if (/balance|allowance|funds|collateral/.test(normalized)
     && /insufficient|not enough|exceed|low|allowance/.test(normalized)) {
     reason = tr('资金地址余额或交易授权不足', 'Funder balance or trading allowance is insufficient');
@@ -655,11 +672,15 @@ function report(event: string, trace?: Trace, detail?: object): void {
       const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
       const submitted = numericDetail('submittedAmount');
       const quote = numericDetail('quotePrice');
+      const dust = numericDetail('discardedDust');
+      const dustText = dust > 0
+        ? tr(`｜尾差 ${numberText(dust)} 份已清除`, ` | cleared ${numberText(dust)} shares of dust`)
+        : '';
       line = side === 'BUY'
         ? tr(`模拟 BUY｜花 ${numberText(submitted)} USD → 约 ${numberText(numericDetail('estimatedSharesAtQuote'))} 份｜盘口 ${numberText(quote)}`,
           `DRY BUY | spend ${numberText(submitted)} USD → about ${numberText(numericDetail('estimatedSharesAtQuote'))} shares | quote ${numberText(quote)}`)
-        : tr(`模拟 SELL｜卖 ${numberText(submitted)} 份 → 约 ${numberText(submitted * quote)} USD｜盘口 ${numberText(quote)}`,
-          `DRY SELL | sell ${numberText(submitted)} shares → about ${numberText(submitted * quote)} USD | quote ${numberText(quote)}`);
+        : tr(`模拟 SELL｜卖 ${numberText(submitted)} 份 → 约 ${numberText(submitted * quote)} USD｜盘口 ${numberText(quote)}${dustText}`,
+          `DRY SELL | sell ${numberText(submitted)} shares → about ${numberText(submitted * quote)} USD | quote ${numberText(quote)}${dustText}`);
       tone = 'warning';
     } else if (event === 'MANUAL BUY' || event === 'MANUAL SELL'
       || event === 'AUTO BUY' || event === 'AUTO SELL') {
@@ -675,11 +696,15 @@ function report(event: string, trace?: Trace, detail?: object): void {
       const making = numericDetail('makingAmount');
       const taking = numericDetail('takingAmount');
       const averageFillPrice = numberText(numericDetail('averageFillPrice'), 2);
+      const dust = numericDetail('discardedDust');
+      const dustText = dust > 0
+        ? tr(`｜尾差 ${numberText(dust)} 份已清除`, ` | cleared ${numberText(dust)} shares of dust`)
+        : '';
       line = side === 'BUY'
         ? tr(`订单成功｜BUY｜花 ${numberText(making)} USD → ${numberText(taking)} 份｜均价 ${averageFillPrice}`,
           `Order success | BUY | spent ${numberText(making)} USD → ${numberText(taking)} shares | avg ${averageFillPrice}`)
-        : tr(`订单成功｜SELL｜卖 ${numberText(making)} 份 → ${numberText(taking)} USD｜均价 ${averageFillPrice}`,
-          `Order success | SELL | sold ${numberText(making)} shares → ${numberText(taking)} USD | avg ${averageFillPrice}`);
+        : tr(`订单成功｜SELL｜卖 ${numberText(making)} 份 → ${numberText(taking)} USD｜均价 ${averageFillPrice}${dustText}`,
+          `Order success | SELL | sold ${numberText(making)} shares → ${numberText(taking)} USD | avg ${averageFillPrice}${dustText}`);
       tone = 'success';
     } else if (event === 'ORDER FAILED') {
       line = tr(`下单失败｜${value('side')}｜${reasonText(data.reason ?? data.code ?? 'Polymarket rejected the order')}`,
@@ -953,7 +978,7 @@ async function main(): Promise<void> {
     updateUiState({
       positionShares: position.shares,
       buyLotCount: position.count,
-      sellLotShares: lot?.shares ?? 0,
+      sellLotShares: lot === undefined ? 0 : quantizeSellShares(lot.shares),
       entryPrice: entryPrice ?? NaN,
       takeProfitTarget: entryPrice === undefined ? NaN : entryPrice * (1 + takeProfit),
       stopLossTarget: entryPrice === undefined ? NaN : entryPrice * (1 - stopLoss),
@@ -968,12 +993,14 @@ async function main(): Promise<void> {
     syncPositionUi(assetId);
   }
 
-  function recordSell(assetId: string, shares: number): void {
+  function recordSell(assetId: string, shares: number): number {
     const lot = latestLotFor(assetId);
-    if (!lot || !Number.isFinite(shares) || shares <= 0) return;
+    if (!lot || !Number.isFinite(shares) || shares <= 0) return 0;
     const previousShares = lot.shares;
     const remainingShares = previousShares - Math.min(shares, previousShares);
-    if (remainingShares <= 1e-12) {
+    const discardedDust = remainingShares > 1e-12 && quantizeSellShares(remainingShares) === 0
+      ? remainingShares : 0;
+    if (remainingShares <= 1e-12 || discardedDust > 0) {
       const lots = buyLotsByToken.get(assetId)!;
       lots.pop();
       if (lots.length === 0) buyLotsByToken.delete(assetId);
@@ -982,6 +1009,18 @@ async function main(): Promise<void> {
       lot.cost *= remainingShares / previousShares;
     }
     syncPositionUi(assetId);
+    return discardedDust;
+  }
+
+  function discardUnsellableLatestLot(assetId: string): number {
+    const lot = latestLotFor(assetId);
+    if (!lot || quantizeSellShares(lot.shares) > 0) return 0;
+    const dust = lot.shares;
+    const lots = buyLotsByToken.get(assetId)!;
+    lots.pop();
+    if (lots.length === 0) buyLotsByToken.delete(assetId);
+    syncPositionUi(assetId);
+    return dust;
   }
 
   function tokenDetail(): object {
@@ -1002,7 +1041,7 @@ async function main(): Promise<void> {
       positionShares: position.shares,
       buyLotCount: position.count,
       displayTradeCount: displayTradeCountFor(),
-      sellLotShares: lot?.shares ?? 0,
+      sellLotShares: lot === undefined ? 0 : quantizeSellShares(lot.shares),
       takeProfitEnabled,
       stopLossEnabled,
       takeProfit,
@@ -1290,6 +1329,7 @@ async function main(): Promise<void> {
     let takeProfitTargetAtInvoke: number | undefined;
     let stopLossTargetAtInvoke: number | undefined;
     let autoTriggerReported = false;
+    let discardedSellDust = 0;
     let ownsLock = false;
     const autoTriggerDetail = (): object => ({
       triggerKind: trace.source,
@@ -1317,7 +1357,15 @@ async function main(): Promise<void> {
       if (side === OrderSide.SELL && sellLotAtInvoke === undefined) {
         throw fault('No unsold BUY lot recorded for current token');
       }
-      estimatedSharesAtQuote = side === OrderSide.BUY ? orderSize / quotePrice : sellLotAtInvoke!.shares;
+      const sellableShares = side === OrderSide.SELL ? quantizeSellShares(sellLotAtInvoke!.shares) : undefined;
+      if (side === OrderSide.SELL && sellableShares === 0) {
+        const dust = discardUnsellableLatestLot(assetId);
+        throw fault(tr(
+          `剩余 ${numberText(dust)} 份低于 Polymarket 可提交精度 0.01 份；已清除不可卖尾差`,
+          `The remaining ${numberText(dust)} shares are below Polymarket's 0.01-share submission precision; unsellable dust was cleared`,
+        ));
+      }
+      estimatedSharesAtQuote = side === OrderSide.BUY ? orderSize / quotePrice : sellableShares;
       if (trace.source !== 'MANUAL') {
         takeProfitTargetAtInvoke = takeProfitTargetFor(assetId);
         stopLossTargetAtInvoke = stopLossTargetFor(assetId);
@@ -1337,7 +1385,7 @@ async function main(): Promise<void> {
           amount: submittedAmount, maxPrice: price, orderType: OrderType.FAK });
       } else {
         // SELL closes the most recent unsold BUY lot; current price only determines proceeds.
-        submittedAmount = sellLotAtInvoke!.shares;
+        submittedAmount = sellableShares!;
         submittedUnit = 'SHARES';
         order = await client.createMarketOrder({ assetId, side,
           shares: submittedAmount, minPrice: price, orderType: OrderType.FAK });
@@ -1355,7 +1403,7 @@ async function main(): Promise<void> {
           const simulatedShares = submittedAmount / quotePrice;
           recordBuy(assetId, simulatedShares, simulatedShares * quotePrice);
         } else {
-          recordSell(assetId, submittedAmount);
+          discardedSellDust = recordSell(assetId, submittedAmount);
         }
         adjustDisplayTradeCount(assetId, side);
         uiRenderBlocked = false;
@@ -1377,6 +1425,7 @@ async function main(): Promise<void> {
           orderType: 'FAK',
           buyAmountUsd: orderSize,
           submittedAmount, submittedUnit,
+          discardedDust: discardedSellDust,
           dry_dispatch_ns: dryDispatch.toString(),
           dry_ws_to_dispatch_us: trace.ws === undefined ? null : Number(dryDispatch - trace.ws) / 1e3,
           dry_ws_to_dispatch_ms: trace.ws === undefined ? null : Number(dryDispatch - trace.ws) / 1e6,
@@ -1408,7 +1457,7 @@ async function main(): Promise<void> {
             recordBuy(assetId, takingAmount, makingAmount);
             averageFillPrice = makingAmount / takingAmount;
           } else {
-            recordSell(assetId, makingAmount);
+            discardedSellDust = recordSell(assetId, makingAmount);
             averageFillPrice = takingAmount / makingAmount;
           }
           adjustDisplayTradeCount(assetId, side);
@@ -1436,7 +1485,8 @@ async function main(): Promise<void> {
           ...tokenDetail(),
           estimatedSharesAtQuote, minOrderSize, averageFillPrice,
           orderId: response.orderId, status: response.status,
-          makingAmount: response.makingAmount, takingAmount: response.takingAmount }
+          makingAmount: response.makingAmount, takingAmount: response.takingAmount,
+          discardedDust: discardedSellDust }
           : { side, tokenId: assetId, quotePrice, limitPrice: price, code: response.code });
     } catch (error) {
       if (trace.post !== undefined && trace.response === undefined) trace.response = now();
