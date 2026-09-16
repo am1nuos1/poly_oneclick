@@ -662,11 +662,12 @@ function report(event: string, trace?: Trace, detail?: object): void {
       const side = value('side');
       const making = numericDetail('makingAmount');
       const taking = numericDetail('takingAmount');
+      const averageFillPrice = numberText(numericDetail('averageFillPrice'), 2);
       line = side === 'BUY'
-        ? tr(`订单成功｜BUY｜花 ${numberText(making)} USD → ${numberText(taking)} 份｜均价 ${value('averageFillPrice')}`,
-          `Order success | BUY | spent ${numberText(making)} USD → ${numberText(taking)} shares | avg ${value('averageFillPrice')}`)
-        : tr(`订单成功｜SELL｜卖 ${numberText(making)} 份 → ${numberText(taking)} USD｜均价 ${value('averageFillPrice')}`,
-          `Order success | SELL | sold ${numberText(making)} shares → ${numberText(taking)} USD | avg ${value('averageFillPrice')}`);
+        ? tr(`订单成功｜BUY｜花 ${numberText(making)} USD → ${numberText(taking)} 份｜均价 ${averageFillPrice}`,
+          `Order success | BUY | spent ${numberText(making)} USD → ${numberText(taking)} shares | avg ${averageFillPrice}`)
+        : tr(`订单成功｜SELL｜卖 ${numberText(making)} 份 → ${numberText(taking)} USD｜均价 ${averageFillPrice}`,
+          `Order success | SELL | sold ${numberText(making)} shares → ${numberText(taking)} USD | avg ${averageFillPrice}`);
       tone = 'success';
     } else if (event === 'ORDER FAILED') {
       line = tr(`下单失败｜${value('side')}｜${reasonText(data.reason ?? data.code ?? 'Polymarket rejected the order')}`,
