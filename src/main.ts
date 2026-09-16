@@ -68,7 +68,10 @@ function safeOrderFailure(error: unknown): { reason: string; errorType?: string;
   const normalized = `${code ?? ''} ${message}`.toLowerCase();
 
   let reason: string;
-  if (/balance|allowance|funds|collateral/.test(normalized)
+  if (/no orders found to match.*fak/.test(normalized)) {
+    reason = tr('FAK 未成交：订单到达时，限价内已无可卖订单；没有扣款',
+      'FAK not filled: no sell order remained within the limit price when it arrived; no funds were spent');
+  } else if (/balance|allowance|funds|collateral/.test(normalized)
     && /insufficient|not enough|exceed|low|allowance/.test(normalized)) {
     reason = tr('资金地址余额或交易授权不足', 'Funder balance or trading allowance is insufficient');
   } else if (/invalid signature|signature.*invalid|could not sign/.test(normalized)) {
