@@ -32,8 +32,11 @@ POLYMARKET_WALLET=AUTO
 # 每按一次 B 花费的美元金额
 ORDER_SIZE=1
 
-# 最近一笔未卖完 BUY 的盈利目标
-AUTO_SELL_PROFIT_PERCENT=20
+# 0.1 表示 10%
+TAKE_PROFIT_ENABLED=true
+TAKE_PROFIT=0.1
+STOP_LOSS_ENABLED=true
+STOP_LOSS=0.1
 
 BUY_SLIPPAGE_ENABLED=true
 SELL_SLIPPAGE_ENABLED=true
@@ -42,6 +45,9 @@ SELL_SLIPPAGE=0
 
 LIVE_TRADING=false
 DEBUG_UI=false
+
+TRADE_LOG_ENABLED=true
+TRADE_LOG_FILE=trade-history.csv
 ```
 
 `config.txt` 已被 Git 忽略，不会推送到仓库。不要分享其中的私钥。
@@ -77,7 +83,7 @@ Bitcoin 五分钟模式会自动转到新一期。也可以用左右键查看相
 | --- | --- |
 | `B` | 花 `ORDER_SIZE` 美元 BUY |
 | `S` | SELL 最近一笔未卖完 BUY 的剩余份额 |
-| `A` | 开启或关闭自动卖出 |
+| `A` | 开启或关闭自动止盈/止损 |
 | `Tab` | 切换 UP / DOWN |
 | `←` | 上一期 |
 | `→` | 下一期 |
@@ -103,7 +109,15 @@ BUY 和 SELL 都使用 FAK：能立即成交的部分成交，其余立即取消
 
 例如用 1 美元在 0.50 买到约 2 份，价格跌到 0.25 后按 `S`，仍然卖约 2 份，预计收回约 0.50 美元。程序不会重新计算成卖出价值 1 美元的份额。
 
-自动卖出也使用最近一笔未卖完 BUY 的成本和剩余份额。批次只保存在内存中；重启或进入下一期市场后会清空。
+自动止盈和止损也使用最近一笔未卖完 BUY 的成本和剩余份额。`TAKE_PROFIT=0.1` 表示成本上涨 10% 时触发，`STOP_LOSS=0.1` 表示成本下跌 10% 时触发。两侧分别用 `TAKE_PROFIT_ENABLED` 和 `STOP_LOSS_ENABLED` 开关。按 `A` 会 armed 所有已打开的项目；触发一次后自动关闭。
+
+批次只保存在内存中；重启或进入下一期市场后会清空。
+
+## 交易记录
+
+默认会在项目目录异步追加 `trade-history.csv`。每行记录一次 BUY/SELL 的 UTC 时间、场次、UP/DOWN、盘口价、限价、实际成交价格、美元、份额、结果、触发来源和延迟。模拟订单标记为 `DRY_RUN` / `SIMULATED`，真实成交才会带有 Polymarket 返回的成交数量。
+
+写入发生在下单发送或响应之后，不会在签名和 `postOrder()` 前同步写文件。该 CSV 用于后续分析，不会在重启时恢复持仓。
 
 ## 价格
 

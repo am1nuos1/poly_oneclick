@@ -14,9 +14,12 @@ POLYMARKET_WALLET=AUTO
 # 每次 SELL 会卖出最近一笔 BUY 实际买到的剩余份额
 ORDER_SIZE=1
 
-# ===== 自动卖出 =====
-# 20 表示最近一笔未卖完的 BUY 上涨 20% 时自动卖出该批次
-AUTO_SELL_PROFIT_PERCENT=20
+# ===== 自动止盈 / 止损 =====
+# 使用比率：0.1=10%，0.2=20%
+TAKE_PROFIT_ENABLED=true
+TAKE_PROFIT=0.1
+STOP_LOSS_ENABLED=true
+STOP_LOSS=0.1
 
 # ===== 成交价格与滑点 =====
 BUY_SLIPPAGE_ENABLED=true
@@ -28,3 +31,8 @@ SELL_SLIPPAGE=0
 LIVE_TRADING=false
 # true 显示完整 Token、market slug 和全部延迟阶段
 DEBUG_UI=false
+
+# ===== 轻量交易记录 =====
+# 异步追加 CSV；不会打印私钥、签名或 API 凭证
+TRADE_LOG_ENABLED=true
+TRADE_LOG_FILE=trade-history.csv

@@ -3,3 +3,4 @@
 config.txt
 node_modules/
 dist/
+trade-history*.csv

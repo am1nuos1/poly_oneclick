@@ -24,7 +24,7 @@ start.cmd
 LIVE_TRADING=false
 ```
 
-这样可以接收真实行情并测试 BUY、SELL 和自动卖出，但不会发送真实订单。
+这样可以接收真实行情并测试 BUY、SELL、止盈和止损，但不会发送真实订单。
 
 ## 2. 完整配置
 
@@ -41,8 +41,12 @@ POLYMARKET_WALLET=AUTO
 # ===== 每次 BUY 花费 =====
 ORDER_SIZE=1
 
-# ===== 自动卖出 =====
-AUTO_SELL_PROFIT_PERCENT=20
+# ===== 自动止盈 / 止损 =====
+# 0.1=10%
+TAKE_PROFIT_ENABLED=true
+TAKE_PROFIT=0.1
+STOP_LOSS_ENABLED=true
+STOP_LOSS=0.1
 
 # ===== 买入价格设置 =====
 BUY_SLIPPAGE_ENABLED=true
@@ -55,6 +59,10 @@ SELL_SLIPPAGE=0
 # ===== 运行模式 =====
 LIVE_TRADING=false
 DEBUG_UI=false
+
+# ===== 轻量交易记录 =====
+TRADE_LOG_ENABLED=true
+TRADE_LOG_FILE=trade-history.csv
 ```
 
 注意：等号两边不要有空格，不要给值加引号，`true` 和 `false` 必须小写。修改配置后需要重新启动程序。不要分享 `config.txt`，里面有你的私钥。
@@ -85,7 +93,7 @@ LANGUAGE=zh
 - `Bitcoin 五分钟`
 - `其他市场`
 
-使用上下方向键选择，按 Enter 确认。这个选择只决定交易哪个市场，不会改变 BUY、SELL、金额、滑点、FAK 或自动卖出方式。
+使用上下方向键选择，按 Enter 确认。这个选择只决定交易哪个市场，不会改变 BUY、SELL、金额、滑点、FAK 或自动退出方式。
 
 - 选择 `Bitcoin 五分钟`：程序按照 `MARKET_OUTCOME=UP` 或 `DOWN` 自动寻找 Token，并在下一期自动更新。
 - 选择 `其他市场`：程序会要求你输入该市场的 Token ID。
@@ -114,17 +122,41 @@ ORDER_SIZE=1
 
 例如用 1 美元在 0.50 买到约 2 份，之后价格跌到 0.25，按 `s` 仍然只卖这约 2 份，预计收回约 0.50 美元。程序不会按照新的价格重新凑出价值 1 美元的份额。FAK 如果只卖出一部分，剩余份额继续保留在该批次中。
 
-### 自动卖出
+### 自动止盈和止损
 
 ```ini
-AUTO_SELL_PROFIT_PERCENT=20
+TAKE_PROFIT_ENABLED=true
+TAKE_PROFIT=0.1
+STOP_LOSS_ENABLED=true
+STOP_LOSS=0.1
 ```
 
-`20` 表示最近一笔未卖完 BUY 批次的盈利目标为 20%。例如该批次买入均价是 50¢，自动卖出目标就是 60¢。
+这两个值使用比率：`0.1` 表示 10%，`0.2` 表示 20%。例如最近一笔 BUY 的均价是 50¢：
 
-先用程序按 `b` 买入，再按 `a` 开启自动卖出。当当前最高买价达到目标价时，程序会尝试卖出一次。没有本次买入记录时按 `a` 会显示 `ARM FAILED`。
+- `TAKE_PROFIT=0.1`：最高买价达到 55¢ 时止盈。
+- `STOP_LOSS=0.1`：最高买价降到 45¢ 时止损。
 
-程序为 UP 和 DOWN 分别记录本次运行中的 BUY 批次。它不会读取启动前、网页或其他程序买入的持仓；重启或进入下一期市场后会清空记录。盈利目标暂时不扣手续费。触发一次后会自动关闭，想再次自动卖出需要再按一次 `a`。
+两个 `ENABLED` 开关互相独立：
+
+- 只要止盈：`TAKE_PROFIT_ENABLED=true`、`STOP_LOSS_ENABLED=false`。
+- 只要止损：`TAKE_PROFIT_ENABLED=false`、`STOP_LOSS_ENABLED=true`。
+- 两个都要：两项都设为 `true`。
+- 两个都不要：两项都设为 `false`，此时按 `a` 不会 armed。
+
+先用程序按 `b` 买入，再按 `a` 同时开启止盈和止损。当前最高买价触及任一条线时，程序会按现有 FAK SELL 逻辑尝试卖出一次。没有本次买入记录时按 `a` 会显示无法开启。
+
+程序为 UP 和 DOWN 分别记录本次运行中的 BUY 批次。它不会读取启动前、网页或其他程序买入的持仓；重启或进入下一期市场后会清空内存批次。目标暂时不扣手续费。触发一次后会自动关闭，想再次启用需要再按一次 `a`。
+
+### 交易记录
+
+```ini
+TRADE_LOG_ENABLED=true
+TRADE_LOG_FILE=trade-history.csv
+```
+
+默认在项目目录保存 `trade-history.csv`。每行包含 UTC 时间、场次、方向、盘口价、限价、实际成交价、美元、份额、成功或失败状态、手动/止盈/止损来源和延迟。模拟交易会明确标为 `DRY_RUN` 和 `SIMULATED`。
+
+记录采用异步追加方式，在发送或收到结果以后才写入，不会在签名和发单前同步写文件。CSV 方便后期分析，但程序重启时不会从 CSV 恢复持仓。
 
 ### BUY 滑点
 
@@ -164,7 +196,7 @@ SELL_SLIPPAGE=0
 
 `LIVE_TRADING=false` 是模拟模式：接收真实市场行情，执行完整判断和本地签名，但不把订单发送到 Polymarket。
 
-`LIVE_TRADING=true` 是真实交易模式：按 `b`、`s` 或自动卖出触发时，会发送真实订单。
+`LIVE_TRADING=true` 是真实交易模式：按 `b`、`s` 或自动止盈/止损触发时，会发送真实订单。
 
 ## 4. 按键操作
 
@@ -180,7 +212,7 @@ SELL_SLIPPAGE=0
 | --- | --- |
 | `b` | BUY 一次 |
 | `s` | SELL 一次 |
-| `a` | 开启或关闭自动卖出 |
+| `a` | 同时开启或关闭自动止盈/止损 |
 | `Tab` | Bitcoin 五分钟运行中切换 UP / DOWN |
 | `←` | 尝试返回上一期五分钟市场 |
 | `→` | 尝试前往下一期五分钟市场 |
@@ -188,7 +220,7 @@ SELL_SLIPPAGE=0
 
 程序一次只处理一笔订单。上一笔还没完成时继续按键，新的订单不会排队。
 
-选择 Bitcoin 五分钟后，可以随时按 `Tab` 切换方向。面板会原地更新当前方向、缩写 Token、`bestBid`、`bestAsk`、最近一笔未卖完 BUY 的成本和自动卖出目标价。切换不需要重新连接，并会关闭当前自动卖出 armed 状态；需要自动卖出时再按一次 `a`。按 `←` 或 `→` 可手动尝试切换到上一期或下一期；如果目标场次不存在、未开放或已结束，程序会提示无法切换并保留当前连接。当前场次结束后程序仍会自动切换。
+选择 Bitcoin 五分钟后，可以随时按 `Tab` 切换方向。面板会原地更新当前方向、缩写 Token、`bestBid`、`bestAsk`、最近一笔未卖完 BUY 的成本、止盈价和止损价。切换不需要重新连接，并会关闭当前自动退出状态；需要自动止盈/止损时再按一次 `a`。按 `←` 或 `→` 可手动尝试切换到上一期或下一期；如果目标场次不存在、未开放或已结束，程序会提示无法切换并保留当前连接。当前场次结束后程序仍会自动切换。
 
 选择“其他市场”时，程序只有你输入的一个 Token ID，因此 `Tab` 不切换品种。
 
@@ -242,7 +274,10 @@ UP 和 DOWN 是两个不同 Token。填错 `TOKEN_ID` 会直接交易错误方�
 
 ```ini
 ORDER_SIZE=1
-AUTO_SELL_PROFIT_PERCENT=20
+TAKE_PROFIT_ENABLED=true
+TAKE_PROFIT=0.1
+STOP_LOSS_ENABLED=true
+STOP_LOSS=0.1
 
 MARKET_OUTCOME=UP
 
@@ -253,13 +288,15 @@ SELL_SLIPPAGE=0
 
 LIVE_TRADING=false
 DEBUG_UI=false
+TRADE_LOG_ENABLED=true
+TRADE_LOG_FILE=trade-history.csv
 ```
 
 测试步骤：
 
 1. 启动后确认顶部显示“可以交易”。
 2. 按 `b`，应看到“模拟 BUY”，并显示花费美元和买到的份额。
-3. 按 `a`，应看到“自动卖出已开启”和根据这笔 BUY 成本算出的目标价。
+3. 按 `a`，应看到“自动卖出已开启”以及根据这笔 BUY 成本算出的止盈价和止损价。
 4. 再按 `a` 关闭自动卖出，然后按 `s`，应看到“模拟 SELL”，卖出份额应与最近一笔 BUY 的记录相同。
 5. 确认操作和价格正确后再考虑真实模式。
 
@@ -277,7 +314,7 @@ DEBUG_UI=false
 
 这是关闭 SELL 滑点保护时使用的最低可接受限价，不代表当前盘口价或预计成交价。建议使用 `SELL_SLIPPAGE_ENABLED=true` 和 `SELL_SLIPPAGE=0`，这样 SELL 限价就是按键时的当前最高买价。日志中的 `quotePrice` 是当前盘口价，`limitPrice` 是允许的最差价格。
 
-### 为什么自动卖出只执行一次？
+### 为什么自动止盈或止损只执行一次？
 
 每次按 `a` 只开启一次。触发后自动关闭，避免连续重复卖出。
 

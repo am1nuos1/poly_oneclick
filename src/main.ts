@@ -3,6 +3,7 @@ import { privateKey } from '@polymarket/client/viem';
 import { fetchOrderBook } from '@polymarket/client/actions';
 import WebSocket from 'ws';
 import { emitKeypressEvents } from 'node:readline';
+import { open, type FileHandle } from 'node:fs/promises';
 
 const now = process.hrtime.bigint;
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
@@ -10,8 +11,35 @@ const ORDER_URL = 'https://clob.polymarket.com/order';
 const GAMMA_URL = 'https://gamma-api.polymarket.com/markets/slug/';
 const POLYGON_RPC_URL = 'https://polygon.drpc.org';
 const MARKET_SECONDS = 300;
+const monotonicOrigin = process.hrtime.bigint();
+const wallClockOriginMs = Date.now();
 type Language = 'zh' | 'en';
 let language: Language = 'zh';
+
+const TRADE_LOG_COLUMNS = [
+  'completed_at_utc', 'submitted_at_utc', 'mode', 'source', 'side', 'status',
+  'market', 'session_start_utc', 'session_end_utc', 'outcome', 'token_id',
+  'quote_price', 'limit_price', 'requested_usd', 'requested_shares',
+  'filled_usd', 'filled_shares', 'average_fill_price', 'order_id',
+  'input_to_post_ms', 'ws_to_post_ms', 'post_to_response_ms', 'total_ms', 'reason',
+] as const;
+type TradeLogColumn = typeof TRADE_LOG_COLUMNS[number];
+type TradeLogRecord = Partial<Record<TradeLogColumn, string | number>>;
+
+function isoFromMonotonic(timestamp: bigint | undefined): string {
+  if (timestamp === undefined) return '';
+  return new Date(wallClockOriginMs + Number(timestamp - monotonicOrigin) / 1e6).toISOString();
+}
+
+function csvCell(value: string | number | undefined): string {
+  if (value === undefined) return '';
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function tradeLogLine(record: TradeLogRecord): string {
+  return `${TRADE_LOG_COLUMNS.map(column => csvCell(record[column])).join(',')}\n`;
+}
 
 function tr(chinese: string, english: string): string {
   return language === 'en' ? english : chinese;
@@ -166,8 +194,9 @@ async function askTokenId(): Promise<string> {
   });
 }
 
+type OrderSource = 'MANUAL' | 'TAKE_PROFIT' | 'STOP_LOSS';
 type Trace = {
-  source: 'AUTO' | 'MANUAL';
+  source: OrderSource;
   ws?: bigint;
   parsed?: bigint;
   input?: bigint;
@@ -208,8 +237,12 @@ type UiState = {
   positionShares: number;
   sellLotShares: number;
   buyLotCount: number;
-  autoSellTarget: number;
-  autoSellProfitPercent: number;
+  takeProfitTarget: number;
+  stopLossTarget: number;
+  takeProfitEnabled: boolean;
+  stopLossEnabled: boolean;
+  takeProfit: number;
+  stopLoss: number;
   orderSize: number;
   buySlippageEnabled: boolean;
   sellSlippageEnabled: boolean;
@@ -225,7 +258,8 @@ const uiState: UiState = {
   session: '—', sessionStart: 0, outcome: '—', tokenId: '', bestBid: NaN, bestAsk: NaN,
   tick: NaN, minOrderSize: NaN, armed: false, entryPrice: NaN, positionShares: 0,
   sellLotShares: 0, buyLotCount: 0,
-  autoSellTarget: NaN, autoSellProfitPercent: 0, orderSize: NaN,
+  takeProfitTarget: NaN, stopLossTarget: NaN, takeProfitEnabled: true, stopLossEnabled: true,
+  takeProfit: 0, stopLoss: 0, orderSize: NaN,
   buySlippageEnabled: true, sellSlippageEnabled: true, buySlippage: 0, sellSlippage: 0,
   debug: false,
 };
@@ -333,7 +367,7 @@ function renderPanel(): void {
   const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
     : uiState.outcome === 'DOWN' ? '--- DOWN ---' : tr('品种 —', 'OUTCOME —');
   const lotLabel = uiState.buyLotCount === 1 ? 'lot' : 'lots';
-  const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 22));
+  const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 23));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
     paint(clip(`${item.at}  ${item.message}${item.count > 1 ? ` ×${item.count}` : ''}`, width).text, item.tone));
   const latency = uiState.latency;
@@ -360,12 +394,16 @@ function renderPanel(): void {
       `Recorded: ${numberText(uiState.positionShares)} shares (${uiState.buyLotCount} ${lotLabel})  |  Tick ${numberText(uiState.tick)}`,
     )),
     row(tr(
-      `下一次 SELL：${numberText(uiState.sellLotShares)} 份 @ 成本 ${numberText(uiState.entryPrice)}  |  目标 ${numberText(uiState.autoSellTarget)}`,
-      `Next SELL: ${numberText(uiState.sellLotShares)} shares @ cost ${numberText(uiState.entryPrice)}  |  Target ${numberText(uiState.autoSellTarget)}`,
+      `下一次 SELL：${numberText(uiState.sellLotShares)} 份 @ 成本 ${numberText(uiState.entryPrice)}`,
+      `Next SELL: ${numberText(uiState.sellLotShares)} shares @ cost ${numberText(uiState.entryPrice)}`,
     )),
     row(tr(
-      `自动卖出：${uiState.armed ? '已开启' : '关闭'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  滑点 买 ${buySlip} / 卖 ${sellSlip}`,
-      `Auto sell: ${uiState.armed ? 'Armed' : 'Off'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  Slippage B ${buySlip} / S ${sellSlip}`,
+      `止盈 ${uiState.takeProfitEnabled ? `${numberText(uiState.takeProfitTarget)} (+${numberText(uiState.takeProfit * 100, 2)}%)` : '关闭'}  |  止损 ${uiState.stopLossEnabled ? `${numberText(uiState.stopLossTarget)} (-${numberText(uiState.stopLoss * 100, 2)}%)` : '关闭'}`,
+      `TP ${uiState.takeProfitEnabled ? `${numberText(uiState.takeProfitTarget)} (+${numberText(uiState.takeProfit * 100, 2)}%)` : 'Off'}  |  SL ${uiState.stopLossEnabled ? `${numberText(uiState.stopLossTarget)} (-${numberText(uiState.stopLoss * 100, 2)}%)` : 'Off'}`,
+    )),
+    row(tr(
+      `自动卖出：${uiState.armed ? '已开启' : '关闭'}  |  滑点 买 ${buySlip} / 卖 ${sellSlip}`,
+      `Auto sell: ${uiState.armed ? 'Armed' : 'Off'}  |  Slippage B ${buySlip} / S ${sellSlip}`,
     ),
       uiState.armed ? 'success' : 'normal'),
     frameLine('└', '┘'),
@@ -443,6 +481,7 @@ function report(event: string, trace?: Trace, detail?: object): void {
         'Token is not prepared': tr('Token 尚未准备完成', 'The token is not ready'),
         'No unsold BUY lot recorded for current token': tr('当前品种没有可卖的 BUY 批次', 'No unsold BUY lot for this outcome'),
         'No BUY entry recorded for current token in this run': tr('本次运行尚未买入当前品种', 'No BUY recorded for this outcome in this run'),
+        'Take profit and stop loss are both disabled': tr('止盈和止损开关均已关闭', 'Take profit and stop loss are both disabled'),
         'No fresh WebSocket quote': tr('没有新鲜的 WebSocket 行情', 'No fresh WebSocket quote'),
         'Requested book side is empty': tr('当前方向没有可成交报价', 'The requested side has no executable quote'),
         'Metadata expired; restart': tr('市场信息已过期，请重启', 'Market metadata expired; restart'),
@@ -506,7 +545,8 @@ function report(event: string, trace?: Trace, detail?: object): void {
       ...(data.positionShares !== undefined && { positionShares: numericDetail('positionShares') }),
       ...(data.sellLotShares !== undefined && { sellLotShares: numericDetail('sellLotShares') }),
       ...(data.buyLotCount !== undefined && { buyLotCount: numericDetail('buyLotCount') }),
-      ...(data.autoSellTarget !== undefined && { autoSellTarget: numericDetail('autoSellTarget') }),
+      ...(data.takeProfitTarget !== undefined && { takeProfitTarget: numericDetail('takeProfitTarget') }),
+      ...(data.stopLossTarget !== undefined && { stopLossTarget: numericDetail('stopLossTarget') }),
     });
     let line: string;
     let tone: UiTone = 'normal';
@@ -517,6 +557,12 @@ function report(event: string, trace?: Trace, detail?: object): void {
           && Number.isFinite(uiState.bestAsk) ? tr('可以交易', 'Ready') : tr('等待行情', 'Waiting for quotes') });
       line = tr('准备完成', 'Ready');
       tone = data.live ? 'error' : 'warning';
+    } else if (event === 'TRADE LOG READY') {
+      line = tr(`交易记录已开启｜${value('file')}`, `Trade log enabled | ${value('file')}`);
+      tone = 'success';
+    } else if (event === 'TRADE LOG FAILED') {
+      line = tr(`交易记录写入失败｜${reasonText(data.reason)}`, `Trade log write failed | ${reasonText(data.reason)}`);
+      tone = 'error';
     } else if (event === 'WS CONNECTED') {
       updateUiState({ connection: tr('已连接', 'Connected'), readiness: Number.isFinite(uiState.bestBid)
         && Number.isFinite(uiState.bestAsk) ? tr('可以交易', 'Ready') : tr('等待报价', 'Waiting for quotes') });
@@ -557,8 +603,12 @@ function report(event: string, trace?: Trace, detail?: object): void {
       tone = 'success';
     } else if (event === 'ARMED') {
       updateUiState({ armed: true });
-      line = tr(`自动卖出已开启｜${value('outcome')}｜目标价 ${value('autoSellTarget')}`,
-        `Auto sell armed | ${value('outcome')} | target ${value('autoSellTarget')}`);
+      const takeProfitText = data.takeProfitEnabled === true
+        ? numberText(numericDetail('takeProfitTarget')) : tr('关闭', 'Off');
+      const stopLossText = data.stopLossEnabled === true
+        ? numberText(numericDetail('stopLossTarget')) : tr('关闭', 'Off');
+      line = tr(`自动卖出已开启｜${value('outcome')}｜止盈 ${takeProfitText}｜止损 ${stopLossText}`,
+        `Auto sell armed | ${value('outcome')} | TP ${takeProfitText} | SL ${stopLossText}`);
       tone = 'success';
     } else if (event === 'DISARMED') {
       updateUiState({ armed: false });
@@ -582,8 +632,12 @@ function report(event: string, trace?: Trace, detail?: object): void {
       tone = 'error';
     } else if (event === 'AUTO SELL TRIGGER') {
       updateUiState({ armed: false });
-      line = tr(`自动卖出触发｜买价 ${value('quotePrice')} ≥ 目标 ${value('autoSellTarget')}`,
-        `Auto sell triggered | bid ${value('quotePrice')} ≥ target ${value('autoSellTarget')}`);
+      const stopLossTriggered = data.triggerKind === 'STOP_LOSS';
+      line = stopLossTriggered
+        ? tr(`止损触发｜买价 ${numberText(numericDetail('quotePrice'))} ≤ ${numberText(numericDetail('stopLossTarget'))}`,
+          `Stop loss triggered | bid ${numberText(numericDetail('quotePrice'))} ≤ ${numberText(numericDetail('stopLossTarget'))}`)
+        : tr(`止盈触发｜买价 ${numberText(numericDetail('quotePrice'))} ≥ ${numberText(numericDetail('takeProfitTarget'))}`,
+          `Take profit triggered | bid ${numberText(numericDetail('quotePrice'))} ≥ ${numberText(numericDetail('takeProfitTarget'))}`);
       tone = 'warning';
     } else if (event.startsWith('DRY RUN ')) {
       const side = event.endsWith('BUY') ? 'BUY' : 'SELL';
@@ -621,7 +675,7 @@ function report(event: string, trace?: Trace, detail?: object): void {
     } else {
       line = data.reason ? `${event}｜${value('reason')}` : event;
     }
-    if (trace?.source === 'AUTO') updateUiState({ armed: false });
+    if (trace?.source !== undefined && trace.source !== 'MANUAL') updateUiState({ armed: false });
     pushUiEvent(line, tone, uiState.debug ? JSON.stringify(data) : undefined);
   });
 }
@@ -644,23 +698,47 @@ async function main(): Promise<void> {
   if (legacyOrderSizeUnit !== undefined && legacyOrderSizeUnit !== 'USD') {
     throw fault('ORDER_SIZE_UNIT must be USD; SELL now closes the latest BUY lot');
   }
-  const autoSellProfitPercent = numeric('AUTO_SELL_PROFIT_PERCENT', 0, 100_000);
+  // Ratios use decimal notation: 0.1 means 10%.
+  const takeProfitEnabled = boolean('TAKE_PROFIT_ENABLED', true);
+  const stopLossEnabled = boolean('STOP_LOSS_ENABLED', true);
+  const takeProfit = numeric('TAKE_PROFIT', 0.0001, 100);
+  const stopLoss = numeric('STOP_LOSS', 0.0001, 1);
   const buySlippageEnabled = boolean('BUY_SLIPPAGE_ENABLED', true);
   const sellSlippageEnabled = boolean('SELL_SLIPPAGE_ENABLED', true);
   const buySlippage = numeric('BUY_SLIPPAGE', 0, 0.9999, 0);
   const sellSlippage = numeric('SELL_SLIPPAGE', 0, 0.9999, 0);
   const live = boolean('LIVE_TRADING', false);
   const debugUi = boolean('DEBUG_UI', false);
+  const tradeLogEnabled = boolean('TRADE_LOG_ENABLED', true);
+  const tradeLogFile = (process.env.TRADE_LOG_FILE ?? 'trade-history.csv').trim();
+  if (!/^[A-Za-z0-9._-]+\.csv$/.test(tradeLogFile)) {
+    throw fault('Invalid TRADE_LOG_FILE; use a simple .csv file name');
+  }
   updateUiState({
     mode: live ? tr('真实交易', 'LIVE TRADING') : tr('模拟模式', 'DRY RUN'),
     connection: tr('连接中', 'Connecting'),
     readiness: tr('正在准备', 'Preparing'),
-    orderSize, autoSellProfitPercent,
+    orderSize, takeProfitEnabled, stopLossEnabled, takeProfit, stopLoss,
     buySlippageEnabled, sellSlippageEnabled, buySlippage, sellSlippage,
     debug: debugUi,
   });
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw fault('Interactive terminal required; run start.cmd');
+  let tradeLogHandle: FileHandle | undefined;
+  let tradeLogQueue: Promise<void> = Promise.resolve();
+  let tradeLogWriteFailed = false;
+  if (tradeLogEnabled) {
+    try {
+      tradeLogHandle = await open(new URL(`../${tradeLogFile}`, import.meta.url), 'a+');
+      if ((await tradeLogHandle.stat()).size === 0) {
+        await tradeLogHandle.appendFile(`${TRADE_LOG_COLUMNS.join(',')}\n`, 'utf8');
+      }
+    } catch {
+      await tradeLogHandle?.close().catch(() => undefined);
+      tradeLogHandle = undefined;
+      throw fault(`Cannot open trade log ${tradeLogFile}`);
+    }
+  }
   emitKeypressEvents(process.stdin);
   process.stdin.setRawMode(true);
   process.stdin.resume();
@@ -736,6 +814,73 @@ async function main(): Promise<void> {
   let lastPong = 0;
   let lastQuote = 0n;
 
+  function queueTradeLog(record: TradeLogRecord): void {
+    const handle = tradeLogHandle;
+    if (!handle) return;
+    // Formatting and file I/O begin on a later event-loop turn, after dispatch/response handling.
+    setImmediate(() => {
+      const line = tradeLogLine(record);
+      tradeLogQueue = tradeLogQueue.then(() => handle.appendFile(line, 'utf8')).catch(() => {
+        if (!tradeLogWriteFailed) {
+          tradeLogWriteFailed = true;
+          report('TRADE LOG FAILED', undefined, { reason: `Cannot append ${tradeLogFile}` });
+        }
+      });
+    });
+  }
+
+  function logOrderResult(details: {
+    side: OrderSide;
+    status: string;
+    trace: Trace;
+    completedAt: bigint;
+    submittedAt?: bigint;
+    assetId: string;
+    quotePrice?: number;
+    limitPrice?: number;
+    requestedUsd?: number;
+    requestedShares?: number;
+    filledUsd?: number;
+    filledShares?: number;
+    averageFillPrice?: number;
+    orderId?: string;
+    reason?: string;
+    market: string;
+    sessionStart: number;
+    outcome: string;
+  }): void {
+    const start = details.trace.input ?? details.trace.ws ?? details.trace.trigger;
+    const submitted = details.submittedAt;
+    queueTradeLog({
+      completed_at_utc: isoFromMonotonic(details.completedAt),
+      submitted_at_utc: isoFromMonotonic(submitted),
+      mode: live ? 'LIVE' : 'DRY_RUN',
+      source: details.trace.source,
+      side: details.side,
+      status: details.status,
+      market: details.market,
+      session_start_utc: details.sessionStart ? new Date(details.sessionStart * 1000).toISOString() : '',
+      session_end_utc: details.sessionStart ? new Date((details.sessionStart + MARKET_SECONDS) * 1000).toISOString() : '',
+      outcome: details.outcome,
+      token_id: details.assetId,
+      quote_price: details.quotePrice,
+      limit_price: details.limitPrice,
+      requested_usd: details.requestedUsd,
+      requested_shares: details.requestedShares,
+      filled_usd: details.filledUsd,
+      filled_shares: details.filledShares,
+      average_fill_price: details.averageFillPrice,
+      order_id: details.orderId,
+      input_to_post_ms: details.trace.input !== undefined && submitted !== undefined
+        ? Number(submitted - details.trace.input) / 1e6 : undefined,
+      ws_to_post_ms: details.trace.ws !== undefined && submitted !== undefined
+        ? Number(submitted - details.trace.ws) / 1e6 : undefined,
+      post_to_response_ms: submitted !== undefined ? Number(details.completedAt - submitted) / 1e6 : undefined,
+      total_ms: Number(details.completedAt - start) / 1e6,
+      reason: details.reason,
+    });
+  }
+
   function latestLotFor(assetId = tokenId): BuyLot | undefined {
     const lots = buyLotsByToken.get(assetId);
     if (!lots) return undefined;
@@ -764,9 +909,14 @@ async function main(): Promise<void> {
     return lot.cost / lot.shares;
   }
 
-  function autoSellTargetFor(assetId = tokenId): number | undefined {
+  function takeProfitTargetFor(assetId = tokenId): number | undefined {
     const entryPrice = entryPriceFor(assetId);
-    return entryPrice === undefined ? undefined : entryPrice * (1 + autoSellProfitPercent / 100);
+    return entryPrice === undefined ? undefined : entryPrice * (1 + takeProfit);
+  }
+
+  function stopLossTargetFor(assetId = tokenId): number | undefined {
+    const entryPrice = entryPriceFor(assetId);
+    return entryPrice === undefined ? undefined : entryPrice * (1 - stopLoss);
   }
 
   function syncPositionUi(assetId: string): void {
@@ -779,8 +929,8 @@ async function main(): Promise<void> {
       buyLotCount: position.count,
       sellLotShares: lot?.shares ?? 0,
       entryPrice: entryPrice ?? NaN,
-      autoSellTarget: entryPrice === undefined
-        ? NaN : entryPrice * (1 + autoSellProfitPercent / 100),
+      takeProfitTarget: entryPrice === undefined ? NaN : entryPrice * (1 + takeProfit),
+      stopLossTarget: entryPrice === undefined ? NaN : entryPrice * (1 - stopLoss),
     });
   }
 
@@ -812,7 +962,8 @@ async function main(): Promise<void> {
     const position = positionFor();
     const lot = latestLotFor();
     const entryPrice = entryPriceFor();
-    const autoSellTarget = autoSellTargetFor();
+    const takeProfitTarget = takeProfitTargetFor();
+    const stopLossTarget = stopLossTargetFor();
     return {
       outcome: autoFindMarket ? marketOutcome : 'CUSTOM',
       market: selectedMarketSlug || null,
@@ -825,8 +976,12 @@ async function main(): Promise<void> {
       positionShares: position.shares,
       buyLotCount: position.count,
       sellLotShares: lot?.shares ?? 0,
-      autoSellProfitPercent,
-      autoSellTarget: autoSellTarget ?? null,
+      takeProfitEnabled,
+      stopLossEnabled,
+      takeProfit,
+      stopLoss,
+      takeProfitTarget: takeProfitTarget ?? null,
+      stopLossTarget: stopLossTarget ?? null,
     };
   }
 
@@ -920,7 +1075,7 @@ async function main(): Promise<void> {
     maintenance = false;
     updateUiState({ tokenId: activeAssetId, tick, minOrderSize, bestBid: NaN, bestAsk: NaN,
       positionShares: 0, sellLotShares: 0, buyLotCount: 0,
-      entryPrice: NaN, autoSellTarget: NaN,
+      entryPrice: NaN, takeProfitTarget: NaN, stopLossTarget: NaN,
       connection: tr('连接中', 'Connecting'), readiness: tr('等待行情', 'Waiting for quotes'), armed: false });
     clearTimeout(expiry);
     expiry = setTimeout(() => invalidate('Metadata lifetime exceeded; restart'),
@@ -1094,13 +1249,25 @@ async function main(): Promise<void> {
   async function execute(side: OrderSide, trace: Trace): Promise<void> {
     trace.invoke = now();
     const connection = socket;
+    let assetIdAtInvoke = tokenId;
+    let marketAtInvoke = selectedMarketSlug || 'CUSTOM';
+    let sessionStartAtInvoke = selectedMarketStart;
+    let outcomeAtInvoke = autoFindMarket ? marketOutcome : 'CUSTOM';
     let price: number | undefined;
     let quotePrice: number | undefined;
     let estimatedSharesAtQuote: number | undefined;
     let sellLotAtInvoke: BuyLot | undefined;
-    let autoTargetAtInvoke: number | undefined;
+    let submittedAmount: number | undefined;
+    let takeProfitTargetAtInvoke: number | undefined;
+    let stopLossTargetAtInvoke: number | undefined;
     let autoTriggerReported = false;
     let ownsLock = false;
+    const autoTriggerDetail = (): object => ({
+      triggerKind: trace.source,
+      quotePrice,
+      takeProfitTarget: takeProfitTargetAtInvoke,
+      stopLossTarget: stopLossTargetAtInvoke,
+    });
     try {
       if (busy) throw fault('Another order is in flight');
       if (blocked) throw fault(blocked);
@@ -1113,18 +1280,24 @@ async function main(): Promise<void> {
       if (Number.isFinite(bestBid) && Number.isFinite(bestAsk) && bestBid > bestAsk) throw fault('Crossed quote');
       const selection = activeSelection;
       const assetId = tokenId;
+      assetIdAtInvoke = assetId;
+      marketAtInvoke = selectedMarketSlug || 'CUSTOM';
+      sessionStartAtInvoke = selectedMarketStart;
+      outcomeAtInvoke = autoFindMarket ? marketOutcome : 'CUSTOM';
       sellLotAtInvoke = side === OrderSide.SELL ? latestLotFor(assetId) : undefined;
       if (side === OrderSide.SELL && sellLotAtInvoke === undefined) {
         throw fault('No unsold BUY lot recorded for current token');
       }
       estimatedSharesAtQuote = side === OrderSide.BUY ? orderSize / quotePrice : sellLotAtInvoke!.shares;
-      autoTargetAtInvoke = trace.source === 'AUTO' ? autoSellTargetFor(assetId) : undefined;
+      if (trace.source !== 'MANUAL') {
+        takeProfitTargetAtInvoke = takeProfitTargetFor(assetId);
+        stopLossTargetAtInvoke = stopLossTargetFor(assetId);
+      }
       busy = true;
       ownsLock = true;
       uiRenderBlocked = true;
       updateUiState({ readiness: tr('正在下单', 'Submitting order') });
       price = priceFor(side);
-      let submittedAmount: number;
       let submittedUnit: 'USD' | 'SHARES';
       let order: Awaited<ReturnType<typeof client.createMarketOrder>>;
       if (side === OrderSide.BUY) {
@@ -1156,10 +1329,18 @@ async function main(): Promise<void> {
           recordSell(assetId, submittedAmount);
         }
         uiRenderBlocked = false;
-        if (trace.source === 'AUTO') {
+        if (trace.source !== 'MANUAL') {
           autoTriggerReported = true;
-          report('AUTO SELL TRIGGER', undefined, { quotePrice, autoSellTarget: autoTargetAtInvoke });
+          report('AUTO SELL TRIGGER', undefined, autoTriggerDetail());
         }
+        const simulatedShares = side === OrderSide.BUY ? submittedAmount / quotePrice : submittedAmount;
+        const simulatedUsd = side === OrderSide.BUY ? submittedAmount : submittedAmount * quotePrice;
+        logOrderResult({ side, status: 'SIMULATED', trace, completedAt: dryDispatch, submittedAt: dryDispatch,
+          assetId, quotePrice, limitPrice: price,
+          requestedUsd: side === OrderSide.BUY ? submittedAmount : undefined,
+          requestedShares: side === OrderSide.SELL ? submittedAmount : undefined,
+          filledUsd: simulatedUsd, filledShares: simulatedShares, averageFillPrice: quotePrice,
+          market: marketAtInvoke, sessionStart: sessionStartAtInvoke, outcome: outcomeAtInvoke });
         report(`DRY RUN ${side}`, trace, { tokenId: assetId, quotePrice, limitPrice: price,
           ...tokenDetail(),
           estimatedSharesAtQuote, minOrderSize,
@@ -1178,11 +1359,11 @@ async function main(): Promise<void> {
       trace.post = now();
       const pending = client.postOrder(order);
       uiRenderBlocked = false;
-      if (trace.source === 'AUTO') {
+      if (trace.source !== 'MANUAL') {
         autoTriggerReported = true;
-        report('AUTO SELL TRIGGER', undefined, { quotePrice, autoSellTarget: autoTargetAtInvoke });
+        report('AUTO SELL TRIGGER', undefined, autoTriggerDetail());
       }
-      report(`${trace.source} ${side}`, { ...trace }, { tokenId: assetId,
+      report(`${trace.source === 'MANUAL' ? 'MANUAL' : 'AUTO'} ${side}`, { ...trace }, { tokenId: assetId,
         quotePrice, limitPrice: price, estimatedSharesAtQuote, minOrderSize, orderType: 'FAK',
         buyAmountUsd: orderSize,
         submittedAmount, submittedUnit });
@@ -1201,6 +1382,23 @@ async function main(): Promise<void> {
             averageFillPrice = takingAmount / makingAmount;
           }
         }
+        logOrderResult({ side, status: String(response.status ?? 'FILLED'), trace,
+          completedAt: trace.response, submittedAt: trace.post, assetId,
+          quotePrice, limitPrice: price,
+          requestedUsd: side === OrderSide.BUY ? submittedAmount : undefined,
+          requestedShares: side === OrderSide.SELL ? submittedAmount : undefined,
+          filledUsd: side === OrderSide.BUY ? makingAmount : takingAmount,
+          filledShares: side === OrderSide.BUY ? takingAmount : makingAmount,
+          averageFillPrice, orderId: response.orderId,
+          market: marketAtInvoke, sessionStart: sessionStartAtInvoke, outcome: outcomeAtInvoke });
+      } else {
+        logOrderResult({ side, status: 'REJECTED', trace,
+          completedAt: trace.response, submittedAt: trace.post, assetId,
+          quotePrice, limitPrice: price,
+          requestedUsd: side === OrderSide.BUY ? submittedAmount : undefined,
+          requestedShares: side === OrderSide.SELL ? submittedAmount : undefined,
+          reason: String(response.code ?? 'Polymarket rejected the order'),
+          market: marketAtInvoke, sessionStart: sessionStartAtInvoke, outcome: outcomeAtInvoke });
       }
       report(response.ok ? 'ORDER SUCCESS' : 'ORDER FAILED', trace,
         response.ok ? { side, tokenId: assetId, quotePrice, limitPrice: price,
@@ -1211,12 +1409,20 @@ async function main(): Promise<void> {
           : { side, tokenId: assetId, quotePrice, limitPrice: price, code: response.code });
     } catch (error) {
       if (trace.post !== undefined && trace.response === undefined) trace.response = now();
-      if (trace.source === 'AUTO' && !autoTriggerReported) {
-        report('AUTO SELL TRIGGER', undefined, { quotePrice, autoSellTarget: autoTargetAtInvoke });
+      if (trace.source !== 'MANUAL' && !autoTriggerReported) {
+        report('AUTO SELL TRIGGER', undefined, autoTriggerDetail());
       }
       // Never print SDK errors wholesale: they can contain requests/auth headers.
       const failure = safeOrderFailure(error);
-      report('ORDER FAILED', trace, { side, tokenId, quotePrice, limitPrice: price,
+      const completedAt = trace.response ?? now();
+      logOrderResult({ side, status: trace.post === undefined ? 'NOT_SUBMITTED' : 'FAILED', trace,
+        completedAt, submittedAt: trace.post, assetId: assetIdAtInvoke,
+        quotePrice, limitPrice: price,
+        requestedUsd: side === OrderSide.BUY ? (submittedAmount ?? orderSize) : undefined,
+        requestedShares: side === OrderSide.SELL ? submittedAmount : undefined,
+        reason: failure.reason, market: marketAtInvoke,
+        sessionStart: sessionStartAtInvoke, outcome: outcomeAtInvoke });
+      report('ORDER FAILED', trace, { side, tokenId: assetIdAtInvoke, quotePrice, limitPrice: price,
         estimatedSharesAtQuote, minOrderSize,
         ...failure,
         outcome: trace.post === undefined ? 'not submitted' : 'check exchange; no automatic retry' });
@@ -1300,13 +1506,20 @@ async function main(): Promise<void> {
 
   function handle(item: any, received: bigint, parsed: bigint): void {
     if (!update(item, received)) return;
-    const targetPrice = autoSellTargetFor();
-    const fire = armed && !busy && !blocked
-      && targetPrice !== undefined && bestBid >= targetPrice;
+    const takeProfitTarget = takeProfitTargetFor();
+    const stopLossTarget = stopLossTargetFor();
+    let triggerSource: OrderSource | undefined;
+    if (armed && !busy && !blocked) {
+      if (takeProfitEnabled && takeProfitTarget !== undefined && bestBid >= takeProfitTarget) {
+        triggerSource = 'TAKE_PROFIT';
+      } else if (stopLossEnabled && stopLossTarget !== undefined && bestBid <= stopLossTarget) {
+        triggerSource = 'STOP_LOSS';
+      }
+    }
     const judged = now();
-    if (fire) {
+    if (triggerSource) {
       armed = false;
-      void execute(OrderSide.SELL, { source: 'AUTO', ws: received, parsed, trigger: judged });
+      void execute(OrderSide.SELL, { source: triggerSource, ws: received, parsed, trigger: judged });
     }
   }
 
@@ -1382,6 +1595,10 @@ async function main(): Promise<void> {
         report('DISARMED', undefined, tokenDetail());
       } else if (blocked) {
         report('ARM FAILED', undefined, { reason: blocked, ...tokenDetail() });
+      } else if (!takeProfitEnabled && !stopLossEnabled) {
+        report('ARM FAILED', undefined, {
+          reason: 'Take profit and stop loss are both disabled', ...tokenDetail(),
+        });
       } else if (entryPriceFor() === undefined) {
         report('ARM FAILED', undefined, {
           reason: 'No BUY entry recorded for current token in this run', ...tokenDetail(),
@@ -1396,6 +1613,7 @@ async function main(): Promise<void> {
     }
   });
   function stop(): void {
+    if (stopped) return;
     clearInterval(panelTimer);
     stopped = true;
     armed = false;
@@ -1407,13 +1625,20 @@ async function main(): Promise<void> {
     socket.terminate();
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
+    const handle = tradeLogHandle;
+    tradeLogHandle = undefined;
+    if (handle) {
+      // Earlier trade-log callbacks run first; close only after their queued appends finish.
+      setImmediate(() => { void tradeLogQueue.finally(() => handle.close()).catch(() => undefined); });
+    }
   }
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  if (tradeLogHandle) report('TRADE LOG READY', undefined, { file: tradeLogFile });
   report('READY', undefined, { live, tick, account: String(client.account.walletType),
     keys: 'b=BUY s=SELL a=arm/disarm Tab=UP/DOWN Left=previous Right=next',
     orderSize, orderSizeUnit: 'USD_BUY_THEN_SELL_LATEST_LOT', minOrderSize, autoFindMarket, marketOutcome,
-    autoSellProfitPercent, buySlippageEnabled, sellSlippageEnabled,
+    takeProfitEnabled, stopLossEnabled, takeProfit, stopLoss, buySlippageEnabled, sellSlippageEnabled,
     market: selectedMarketSlug || null,
     session: selectedMarketStart ? formatSessionRange(selectedMarketStart) : null });
 }
