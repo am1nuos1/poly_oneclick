@@ -340,7 +340,6 @@ function renderPanel(): void {
   // Bold-only codes do not reset the panel color, so the cursor width stays stable on Windows Terminal.
   const strongRow = (text: string): string => process.stdout.isTTY
     ? `${side}${ANSI.bold}${fitContent(text)}\x1b[22m${side}` : `${side}${fitContent(text)}${side}`;
-  const strongToneRow = (text: string, _tone: UiTone): string => strongRow(text);
   const frameLine = (left: string, right: string): string => `${left}${'─'.repeat(width)}${right}`;
   const summaryTone: UiTone = uiState.connection === tr('已断开', 'Disconnected')
     || uiState.connection === tr('重连中', 'Reconnecting')
@@ -366,6 +365,18 @@ function renderPanel(): void {
   const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : tr('关闭', 'Off');
   const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
     : uiState.outcome === 'DOWN' ? '--- DOWN ---' : tr('品种 —', 'OUTCOME —');
+  const remainingLots = tr(`剩余笔数：${uiState.buyLotCount}`, `Lots remaining: ${uiState.buyLotCount}`);
+  const outcomeBannerRow = (): string => {
+    const right = clip(remainingLots, width - 3);
+    const left = clip(outcomeBanner, Math.max(0, width - right.width - 3));
+    const gap = ' '.repeat(Math.max(1, width - left.width - right.width - 2));
+    const colorEnabled = process.stdout.isTTY && process.env.NO_COLOR === undefined && outcomeTone !== 'normal';
+    const content = colorEnabled
+      ? ` ${left.text}${gap}${ANSI.white}${right.text}${outcomeTone === 'success' ? ANSI.green : ANSI.red} `
+      : ` ${left.text}${gap}${right.text} `;
+    return process.stdout.isTTY
+      ? `${side}${ANSI.bold}${content}\x1b[22m${side}` : `${side}${content}${side}`;
+  };
   const lotLabel = uiState.buyLotCount === 1 ? 'lot' : 'lots';
   const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 23));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
@@ -379,7 +390,7 @@ function renderPanel(): void {
     row(`${tr('场次状态：', 'Session status: ')}${session.label}`, session.tone),
     row(`${tr('场次时间：', 'Session: ')}${uiState.session}`),
     frameLine('├', '┤'),
-    strongToneRow(outcomeBanner, outcomeTone),
+    outcomeBannerRow(),
     strongRow(tr('当前可成交价格', 'CURRENT EXECUTABLE PRICES')),
     strongPriceRow(tr('BUY  买入价', 'BUY   Price'), buyPrice, '(Best Ask)'),
     strongPriceRow(tr('SELL 卖出价', 'SELL  Price'), sellPrice, '(Best Bid)'),
