@@ -301,21 +301,13 @@ function renderPanel(): void {
     const clipped = clip(text, width - 2);
     return ` ${clipped.text}${' '.repeat(width - clipped.width - 1)}`;
   };
-  const styleContent = (text: string, tone: UiTone, bold: boolean): string => {
-    if (!process.stdout.isTTY) return text;
-    if (process.env.NO_COLOR !== undefined || tone === 'normal') return bold ? emphasize(text) : text;
-    const color = tone === 'success' ? ANSI.green : tone === 'warning' ? ANSI.yellow : ANSI.red;
-    return `${color}${bold ? ANSI.bold : ''}${text}${ANSI.reset}`;
-  };
-  const side = outcomeTone === 'normal' ? '│' : paint('█', outcomeTone);
-  const row = (text: string, tone: UiTone = 'normal'): string =>
-    `${side}${styleContent(fitContent(text), tone, false)}${side}`;
-  const strongRow = (text: string): string => `${side}${styleContent(fitContent(text), 'normal', true)}${side}`;
-  const strongToneRow = (text: string, tone: UiTone): string => {
-    return `${side}${styleContent(fitContent(text), tone, true)}${side}`;
-  };
-  const frameLine = (left: string, right: string): string =>
-    paint(`${left}${'─'.repeat(width)}${right}`, outcomeTone);
+  const side = outcomeTone === 'normal' ? '│' : '█';
+  const row = (text: string, _tone: UiTone = 'normal'): string => `${side}${fitContent(text)}${side}`;
+  // Bold-only codes do not reset the panel color, so the cursor width stays stable on Windows Terminal.
+  const strongRow = (text: string): string => process.stdout.isTTY
+    ? `${side}${ANSI.bold}${fitContent(text)}\x1b[22m${side}` : `${side}${fitContent(text)}${side}`;
+  const strongToneRow = (text: string, _tone: UiTone): string => strongRow(text);
+  const frameLine = (left: string, right: string): string => `${left}${'─'.repeat(width)}${right}`;
   const summaryTone: UiTone = uiState.connection === tr('已断开', 'Disconnected')
     || uiState.connection === tr('重连中', 'Reconnecting')
     || uiState.mode === tr('真实交易', 'LIVE TRADING') ? 'error'
@@ -335,7 +327,7 @@ function renderPanel(): void {
     paint(clip(`${item.at}  ${item.message}${item.count > 1 ? ` ×${item.count}` : ''}`, width).text, item.tone));
   const latency = uiState.latency;
   const latencyText = (value?: UiDuration): string => value ? `${value.ms.toFixed(3)} ms` : '—';
-  const lines = [
+  const panelLines = [
     frameLine('┌', '┐'),
     row(`POLY ONECLICK  |  ${uiState.mode}  |  ${tr('行情', 'WS')} ${uiState.connection}  |  ${uiState.readiness}`, summaryTone),
     row(`${tr('市场：', 'Market: ')}${uiState.market}  |  ${uiState.outcome}  |  Token ${shortToken(uiState.tokenId)}`),
@@ -366,6 +358,9 @@ function renderPanel(): void {
     ),
       uiState.armed ? 'success' : 'normal'),
     frameLine('└', '┘'),
+  ];
+  const lines = [
+    paint(panelLines.join('\n'), outcomeTone),
     clip(tr(
       '  B买  S卖  A自动  Tab切UP/DOWN  ←上期  →下期  Ctrl+C退出',
       '  B Buy  S Sell  A Auto  Tab UP/DOWN  ← Prev  → Next  Ctrl+C Exit',
