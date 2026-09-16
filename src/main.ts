@@ -285,6 +285,8 @@ function emphasize(text: string): string {
 
 function renderPanel(): void {
   const width = Math.max(38, Math.min(76, (process.stdout.columns || 80) - 2));
+  const outcomeTone: UiTone = uiState.outcome === 'UP' ? 'success'
+    : uiState.outcome === 'DOWN' ? 'error' : 'normal';
   const clip = (text: string, maximum: number): { text: string; width: number } => {
     let result = '', used = 0;
     for (const char of text.replace(/[\x00-\x1f\x7f]/g, ' ')) {
@@ -295,18 +297,25 @@ function renderPanel(): void {
     }
     return { text: result, width: used };
   };
-  const fit = (text: string): string => {
+  const fitContent = (text: string): string => {
     const clipped = clip(text, width - 2);
-    return `│ ${clipped.text}${' '.repeat(width - clipped.width - 1)}│`;
+    return ` ${clipped.text}${' '.repeat(width - clipped.width - 1)}`;
   };
-  const row = (text: string, tone: UiTone = 'normal'): string => paint(fit(text), tone);
-  const strongRow = (text: string): string => emphasize(fit(text));
-  const strongToneRow = (text: string, tone: UiTone): string => {
-    const fitted = fit(text);
-    if (!process.stdout.isTTY || process.env.NO_COLOR !== undefined || tone === 'normal') return emphasize(fitted);
+  const styleContent = (text: string, tone: UiTone, bold: boolean): string => {
+    if (!process.stdout.isTTY) return text;
+    if (process.env.NO_COLOR !== undefined || tone === 'normal') return bold ? emphasize(text) : text;
     const color = tone === 'success' ? ANSI.green : tone === 'warning' ? ANSI.yellow : ANSI.red;
-    return `${color}${ANSI.bold}${fitted}${ANSI.reset}`;
+    return `${color}${bold ? ANSI.bold : ''}${text}${ANSI.reset}`;
   };
+  const side = outcomeTone === 'normal' ? '│' : paint('█', outcomeTone);
+  const row = (text: string, tone: UiTone = 'normal'): string =>
+    `${side}${styleContent(fitContent(text), tone, false)}${side}`;
+  const strongRow = (text: string): string => `${side}${styleContent(fitContent(text), 'normal', true)}${side}`;
+  const strongToneRow = (text: string, tone: UiTone): string => {
+    return `${side}${styleContent(fitContent(text), tone, true)}${side}`;
+  };
+  const frameLine = (left: string, right: string): string =>
+    paint(`${left}${'─'.repeat(width)}${right}`, outcomeTone);
   const summaryTone: UiTone = uiState.connection === tr('已断开', 'Disconnected')
     || uiState.connection === tr('重连中', 'Reconnecting')
     || uiState.mode === tr('真实交易', 'LIVE TRADING') ? 'error'
@@ -320,8 +329,6 @@ function renderPanel(): void {
   const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : tr('关闭', 'Off');
   const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
     : uiState.outcome === 'DOWN' ? '--- DOWN ---' : tr('品种 —', 'OUTCOME —');
-  const outcomeTone: UiTone = uiState.outcome === 'UP' ? 'success'
-    : uiState.outcome === 'DOWN' ? 'error' : 'normal';
   const lotLabel = uiState.buyLotCount === 1 ? 'lot' : 'lots';
   const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 22));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
@@ -329,18 +336,18 @@ function renderPanel(): void {
   const latency = uiState.latency;
   const latencyText = (value?: UiDuration): string => value ? `${value.ms.toFixed(3)} ms` : '—';
   const lines = [
-    `┌${'─'.repeat(width)}┐`,
+    frameLine('┌', '┐'),
     row(`POLY ONECLICK  |  ${uiState.mode}  |  ${tr('行情', 'WS')} ${uiState.connection}  |  ${uiState.readiness}`, summaryTone),
     row(`${tr('市场：', 'Market: ')}${uiState.market}  |  ${uiState.outcome}  |  Token ${shortToken(uiState.tokenId)}`),
     row(`${tr('场次状态：', 'Session status: ')}${session.label}`, session.tone),
     row(`${tr('场次时间：', 'Session: ')}${uiState.session}`),
-    paint(`├${'─'.repeat(width)}┤`, outcomeTone),
+    frameLine('├', '┤'),
     strongToneRow(outcomeBanner, outcomeTone),
     strongRow(tr('当前可成交价格', 'CURRENT EXECUTABLE PRICES')),
     strongRow(`${tr('BUY  买入价', 'BUY   Price')}    ${buyPrice}    (Best Ask)`),
     strongRow(`${tr('SELL 卖出价', 'SELL  Price')}    ${sellPrice}    (Best Bid)`),
     row(`${tr('买卖价差：', 'Spread: ')}${numberText(spread)}`),
-    `├${'─'.repeat(width)}┤`,
+    frameLine('├', '┤'),
     row(tr(
       `每次 BUY：${numberText(uiState.orderSize)} USD  |  SELL：最近一笔 BUY 的剩余份额`,
       `Each BUY: ${numberText(uiState.orderSize)} USD  |  SELL: latest BUY lot balance`,
@@ -358,7 +365,7 @@ function renderPanel(): void {
       `Auto sell: ${uiState.armed ? 'Armed' : 'Off'} (+${numberText(uiState.autoSellProfitPercent, 2)}%)  |  Slippage B ${buySlip} / S ${sellSlip}`,
     ),
       uiState.armed ? 'success' : 'normal'),
-    `└${'─'.repeat(width)}┘`,
+    frameLine('└', '┘'),
     clip(tr(
       '  B买  S卖  A自动  Tab切UP/DOWN  ←上期  →下期  Ctrl+C退出',
       '  B Buy  S Sell  A Auto  Tab UP/DOWN  ← Prev  → Next  Ctrl+C Exit',
