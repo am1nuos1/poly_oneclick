@@ -237,6 +237,7 @@ type UiState = {
   positionShares: number;
   sellLotShares: number;
   buyLotCount: number;
+  displayTradeCount: number;
   takeProfitTarget: number;
   stopLossTarget: number;
   takeProfitEnabled: boolean;
@@ -257,7 +258,7 @@ const uiState: UiState = {
   mode: '准备中', connection: '连接中', readiness: '正在准备', market: '—', marketSlug: '',
   session: '—', sessionStart: 0, outcome: '—', tokenId: '', bestBid: NaN, bestAsk: NaN,
   tick: NaN, minOrderSize: NaN, armed: false, entryPrice: NaN, positionShares: 0,
-  sellLotShares: 0, buyLotCount: 0,
+  sellLotShares: 0, buyLotCount: 0, displayTradeCount: 0,
   takeProfitTarget: NaN, stopLossTarget: NaN, takeProfitEnabled: true, stopLossEnabled: true,
   takeProfit: 0, stopLoss: 0, orderSize: NaN,
   buySlippageEnabled: true, sellSlippageEnabled: true, buySlippage: 0, sellSlippage: 0,
@@ -365,7 +366,7 @@ function renderPanel(): void {
   const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : tr('关闭', 'Off');
   const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
     : uiState.outcome === 'DOWN' ? '--- DOWN ---' : tr('品种 —', 'OUTCOME —');
-  const remainingLots = tr(`剩余笔数：${uiState.buyLotCount}`, `Lots remaining: ${uiState.buyLotCount}`);
+  const remainingLots = tr(`剩余笔数：${uiState.displayTradeCount}`, `Lots remaining: ${uiState.displayTradeCount}`);
   const outcomeBannerRow = (): string => {
     const right = clip(remainingLots, width - 3);
     const left = clip(outcomeBanner, Math.max(0, width - right.width - 3));
@@ -377,7 +378,6 @@ function renderPanel(): void {
     return process.stdout.isTTY
       ? `${side}${ANSI.bold}${content}\x1b[22m${side}` : `${side}${content}${side}`;
   };
-  const lotLabel = uiState.buyLotCount === 1 ? 'lot' : 'lots';
   const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 23));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
     paint(clip(`${item.at}  ${item.message}${item.count > 1 ? ` ×${item.count}` : ''}`, width).text, item.tone));
@@ -401,8 +401,8 @@ function renderPanel(): void {
       `Each BUY: ${numberText(uiState.orderSize)} USD  |  SELL: latest BUY lot balance`,
     )),
     row(tr(
-      `本次记录：${numberText(uiState.positionShares)} 份（${uiState.buyLotCount} 笔）  |  Tick ${numberText(uiState.tick)}`,
-      `Recorded: ${numberText(uiState.positionShares)} shares (${uiState.buyLotCount} ${lotLabel})  |  Tick ${numberText(uiState.tick)}`,
+      `本次持仓：${numberText(uiState.positionShares)} 份  |  Tick ${numberText(uiState.tick)}`,
+      `Position: ${numberText(uiState.positionShares)} shares  |  Tick ${numberText(uiState.tick)}`,
     )),
     row(tr(
       `下一次 SELL：${numberText(uiState.sellLotShares)} 份 @ 成本 ${numberText(uiState.entryPrice)}`,
@@ -556,6 +556,7 @@ function report(event: string, trace?: Trace, detail?: object): void {
       ...(data.positionShares !== undefined && { positionShares: numericDetail('positionShares') }),
       ...(data.sellLotShares !== undefined && { sellLotShares: numericDetail('sellLotShares') }),
       ...(data.buyLotCount !== undefined && { buyLotCount: numericDetail('buyLotCount') }),
+      ...(data.displayTradeCount !== undefined && { displayTradeCount: numericDetail('displayTradeCount') }),
       ...(data.takeProfitTarget !== undefined && { takeProfitTarget: numericDetail('takeProfitTarget') }),
       ...(data.stopLossTarget !== undefined && { stopLossTarget: numericDetail('stopLossTarget') }),
     });
@@ -806,6 +807,8 @@ async function main(): Promise<void> {
   const tokenMinOrderSizes = new Map<string, number>();
   const quotes = new Map<string, Quote>();
   const buyLotsByToken = new Map<string, BuyLot[]>();
+  // Display-only count. It never participates in position sizing or order decisions.
+  const displayTradeCountsByToken = new Map<string, number>();
   let activeSelection = 0;
   let tick = NaN;
   let minOrderSize = NaN;
@@ -915,6 +918,17 @@ async function main(): Promise<void> {
     return { shares, cost, count: lots.length };
   }
 
+  function displayTradeCountFor(assetId = tokenId): number {
+    return displayTradeCountsByToken.get(assetId) ?? 0;
+  }
+
+  function adjustDisplayTradeCount(assetId: string, side: OrderSide): void {
+    const current = displayTradeCountFor(assetId);
+    const next = side === OrderSide.BUY ? current + 1 : Math.max(0, current - 1);
+    displayTradeCountsByToken.set(assetId, next);
+    if (assetId === tokenId) updateUiState({ displayTradeCount: next });
+  }
+
   function entryPriceFor(assetId = tokenId): number | undefined {
     const lot = latestLotFor(assetId);
     if (!lot || lot.shares <= 0 || lot.cost <= 0) return undefined;
@@ -987,6 +1001,7 @@ async function main(): Promise<void> {
       entryPrice: entryPrice ?? null,
       positionShares: position.shares,
       buyLotCount: position.count,
+      displayTradeCount: displayTradeCountFor(),
       sellLotShares: lot?.shares ?? 0,
       takeProfitEnabled,
       stopLossEnabled,
@@ -1087,6 +1102,7 @@ async function main(): Promise<void> {
     maintenance = false;
     updateUiState({ tokenId: activeAssetId, tick, minOrderSize, bestBid: NaN, bestAsk: NaN,
       positionShares: 0, sellLotShares: 0, buyLotCount: 0,
+      displayTradeCount: displayTradeCountFor(activeAssetId),
       entryPrice: NaN, takeProfitTarget: NaN, stopLossTarget: NaN,
       connection: tr('连接中', 'Connecting'), readiness: tr('等待行情', 'Waiting for quotes'), armed: false });
     clearTimeout(expiry);
@@ -1135,6 +1151,7 @@ async function main(): Promise<void> {
       selectedMarketStart = selected.start;
       selectedMarketSlug = selected.slug;
       buyLotsByToken.clear();
+      displayTradeCountsByToken.clear();
       finishPreparation(
         [selected.assets.UP, selected.assets.DOWN],
         selected.assets[marketOutcome],
@@ -1340,6 +1357,7 @@ async function main(): Promise<void> {
         } else {
           recordSell(assetId, submittedAmount);
         }
+        adjustDisplayTradeCount(assetId, side);
         uiRenderBlocked = false;
         if (trace.source !== 'MANUAL') {
           autoTriggerReported = true;
@@ -1393,6 +1411,7 @@ async function main(): Promise<void> {
             recordSell(assetId, makingAmount);
             averageFillPrice = takingAmount / makingAmount;
           }
+          adjustDisplayTradeCount(assetId, side);
         }
         logOrderResult({ side, status: String(response.status ?? 'FILLED'), trace,
           completedAt: trace.response, submittedAt: trace.post, assetId,
