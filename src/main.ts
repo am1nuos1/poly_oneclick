@@ -271,7 +271,7 @@ function shortToken(tokenId: string): string {
   return tokenId.length > 14 ? `${tokenId.slice(0, 7)}...${tokenId.slice(-5)}` : tokenId || '—';
 }
 
-const ANSI = { reset: '\x1b[0m', bold: '\x1b[1m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m' };
+const ANSI = { reset: '\x1b[0m', bold: '\x1b[1m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', white: '\x1b[37m' };
 
 function paint(text: string, tone: UiTone): string {
   if (!process.stdout.isTTY || process.env.NO_COLOR !== undefined || tone === 'normal') return text;
@@ -317,6 +317,17 @@ function renderPanel(): void {
     ? uiState.bestAsk - uiState.bestBid : NaN;
   const buyPrice = Number.isFinite(uiState.bestAsk) ? numberText(uiState.bestAsk) : tr('暂无报价', 'No quote');
   const sellPrice = Number.isFinite(uiState.bestBid) ? numberText(uiState.bestBid) : tr('暂无报价', 'No quote');
+  const priceText = (value: string): string => {
+    if (!process.stdout.isTTY || process.env.NO_COLOR !== undefined || outcomeTone === 'normal') return value;
+    const outcomeColor = outcomeTone === 'success' ? ANSI.green : ANSI.red;
+    return `${ANSI.white}${value}${outcomeColor}`;
+  };
+  const strongPriceRow = (label: string, value: string, source: string): string => {
+    const content = fitContent(`${label}    ${value}    ${source}`);
+    const highlighted = content.replace(value, priceText(value));
+    return process.stdout.isTTY
+      ? `${side}${ANSI.bold}${highlighted}\x1b[22m${side}` : `${side}${highlighted}${side}`;
+  };
   const buySlip = uiState.buySlippageEnabled ? numberText(uiState.buySlippage) : tr('关闭', 'Off');
   const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : tr('关闭', 'Off');
   const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
@@ -336,8 +347,8 @@ function renderPanel(): void {
     frameLine('├', '┤'),
     strongToneRow(outcomeBanner, outcomeTone),
     strongRow(tr('当前可成交价格', 'CURRENT EXECUTABLE PRICES')),
-    strongRow(`${tr('BUY  买入价', 'BUY   Price')}    ${buyPrice}    (Best Ask)`),
-    strongRow(`${tr('SELL 卖出价', 'SELL  Price')}    ${sellPrice}    (Best Bid)`),
+    strongPriceRow(tr('BUY  买入价', 'BUY   Price'), buyPrice, '(Best Ask)'),
+    strongPriceRow(tr('SELL 卖出价', 'SELL  Price'), sellPrice, '(Best Bid)'),
     row(`${tr('买卖价差：', 'Spread: ')}${numberText(spread)}`),
     frameLine('├', '┤'),
     row(tr(
