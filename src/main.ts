@@ -301,6 +301,12 @@ function renderPanel(): void {
   };
   const row = (text: string, tone: UiTone = 'normal'): string => paint(fit(text), tone);
   const strongRow = (text: string): string => emphasize(fit(text));
+  const strongToneRow = (text: string, tone: UiTone): string => {
+    const fitted = fit(text);
+    if (!process.stdout.isTTY || process.env.NO_COLOR !== undefined || tone === 'normal') return emphasize(fitted);
+    const color = tone === 'success' ? ANSI.green : tone === 'warning' ? ANSI.yellow : ANSI.red;
+    return `${color}${ANSI.bold}${fitted}${ANSI.reset}`;
+  };
   const summaryTone: UiTone = uiState.connection === tr('已断开', 'Disconnected')
     || uiState.connection === tr('重连中', 'Reconnecting')
     || uiState.mode === tr('真实交易', 'LIVE TRADING') ? 'error'
@@ -314,6 +320,8 @@ function renderPanel(): void {
   const sellSlip = uiState.sellSlippageEnabled ? numberText(uiState.sellSlippage) : tr('关闭', 'Off');
   const outcomeBanner = uiState.outcome === 'UP' ? '+++ UP +++'
     : uiState.outcome === 'DOWN' ? '--- DOWN ---' : tr('品种 —', 'OUTCOME —');
+  const outcomeTone: UiTone = uiState.outcome === 'UP' ? 'success'
+    : uiState.outcome === 'DOWN' ? 'error' : 'normal';
   const lotLabel = uiState.buyLotCount === 1 ? 'lot' : 'lots';
   const eventSlots = Math.max(3, Math.min(10, (process.stdout.rows || 30) - 22));
   const visibleEvents = uiEvents.slice(-eventSlots).map(item =>
@@ -326,8 +334,8 @@ function renderPanel(): void {
     row(`${tr('市场：', 'Market: ')}${uiState.market}  |  ${uiState.outcome}  |  Token ${shortToken(uiState.tokenId)}`),
     row(`${tr('场次状态：', 'Session status: ')}${session.label}`, session.tone),
     row(`${tr('场次时间：', 'Session: ')}${uiState.session}`),
-    `├${'─'.repeat(width)}┤`,
-    strongRow(outcomeBanner),
+    paint(`├${'─'.repeat(width)}┤`, outcomeTone),
+    strongToneRow(outcomeBanner, outcomeTone),
     strongRow(tr('当前可成交价格', 'CURRENT EXECUTABLE PRICES')),
     strongRow(`${tr('BUY  买入价', 'BUY   Price')}    ${buyPrice}    (Best Ask)`),
     strongRow(`${tr('SELL 卖出价', 'SELL  Price')}    ${sellPrice}    (Best Bid)`),
